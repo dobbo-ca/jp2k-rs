@@ -1,0 +1,1 @@
+This crate is a Rust port of github.com/dobbo-ca/jp2k-go. The Go source it was ported from is vendored, for the parity tests, under tests/parity/go/upstream (Apache-2.0).

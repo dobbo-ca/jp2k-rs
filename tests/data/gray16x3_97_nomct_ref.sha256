@@ -1,0 +1,17 @@
+# gray16x3_97_nomct.j2k: a synthetic 160x120 3-component 16-bit image,
+# opj_compress -I -mct 0 -n 4 -b 16,16 -t 96,80 -r 12,4. Below, the
+# sha256 of each PGX file opj_decompress 2.5.4 writes for it with
+# -o full.pgx, -o r1.pgx -r 1, -o d.pgx -d 37,21,131,97 and
+# -o dr1.pgx -d 37,21,131,97 -r 1.
+bdb26a33cac31df4d63d714022aef29719eb9afd487faca3a721582e49fd4cd6  full_0.pgx
+9a0ff18646820eb8b4ab766a8a71682bf0335538aa88ce2f216e7b178e5d77cd  full_1.pgx
+9f39dcbbb34cc6f42179c95b2cb85411643ad8836ee1d6377ee5604e07659092  full_2.pgx
+8bff4ff06ae5065db6cf47320dbc1d3ece5d530859c24ed8b9bf74099598712f  r1_0.pgx
+6a997ac84e4fc1005e006f284f93ed6f5e0842db5984e0bdf151a6fbc5088914  r1_1.pgx
+550cbcc16d12ab06c002bf3873d02b9e19967b77e5ae5224c363f592d68521a1  r1_2.pgx
+501e36f265799092cbfd3c1076bf001c54177c4cf599d7d17d02afdbd342c914  d_0.pgx
+611dcfe25534def910d9c4a8cbff128b60b2a2babe727f22a909083087027943  d_1.pgx
+d17280b28fb0a028f24479af816eb2dbc1028df3366df504f65920ec39bdf426  d_2.pgx
+79362c35cfc5acbf157d0556fcbadaf28107b9822360d11bfd49e737e1daac3d  dr1_0.pgx
+676dac8bda297689278f8f7bc9c7daaf48a8f9ed2276d36b3e2353f381a853fd  dr1_1.pgx
+15cb34498b2b0fa5162de99b461cf012bc1b633b5fd6ddf31473bee53095ba4a  dr1_2.pgx

@@ -1,0 +1,36 @@
+name: bench
+on: { workflow_dispatch: {}, push: { branches: [main] } }
+permissions:
+  contents: read
+# A new run waits for the one before it; it does not cancel it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  # Not a required check. The Go and Rust decodes of the fixtures run in one container, so the
+  # ratio compares the same machine. Three tables, all gated at 1.10: default threads on a reused
+  # pool, one thread, and Options::default() without a caller pool (the shared pool).
+  # Then two tables of the x86-64-v4 builds (Go GOAMD64=v4, Rust with -C target-cpu=x86-64-v4),
+  # default threads and one thread, not gated.
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { lfs: false }
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: .github/ci/Dockerfile
+          target: bench
+          cache-from: type=gha,scope=jp2k-rs-bench
+          cache-to: type=gha,mode=max,scope=jp2k-rs-bench
+          load: true
+          push: false
+          tags: jp2k-bench:local
+      # docker run, not a RUN layer: a BuildKit cache hit would skip the timing.
+      # shell: bash runs with -o pipefail, so a class above 1.10 in bench.sh fails the job.
+      - shell: bash
+        run: |
+          { docker run --rm jp2k-bench:local sh tests/parity/bench.sh; } | tee -a "$GITHUB_STEP_SUMMARY"

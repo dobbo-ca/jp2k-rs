@@ -1,0 +1,143 @@
+name: fuzz
+on:
+  schedule: [{ cron: '23 6 * * 2' }]
+  workflow_dispatch:
+    inputs:
+      max_total_time:
+        description: Seconds per target
+        default: '600'
+      arm64_only:
+        description: Run only fuzz-arm64 (skip the x86_64 matrix)
+        type: boolean
+        default: false
+permissions:
+  contents: read
+# A new run waits for the one before it; it does not cancel it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  fuzz:
+    if: ${{ !inputs.arm64_only }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        target: [decode, decode_limits, reader, region, components, codestream, markers, tier2, tier1, mq, threads, simd_kernels]
+        # `scalar` (JP2K_SIMD=scalar) runs the decoders on the scalar kernels, which the SIMD tier
+        # hides on an AVX-512 runner. The parsers, tier-1 and tier-2 do not use the kernels, and
+        # simd_kernels runs every tier itself.
+        simd: [default, scalar]
+        exclude:
+          - { target: reader, simd: scalar }
+          - { target: codestream, simd: scalar }
+          - { target: markers, simd: scalar }
+          - { target: tier2, simd: scalar }
+          - { target: tier1, simd: scalar }
+          - { target: mq, simd: scalar }
+          - { target: simd_kernels, simd: scalar }
+    timeout-minutes: 60
+    env:
+      MAX_TOTAL_TIME: ${{ inputs.max_total_time || '600' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { lfs: false }
+      # GitHub-hosted runners vary: simd_kernels fails if the AVX-512 tier is missing only where
+      # the CPU has AVX-512.
+      - run: grep -qw avx512f /proc/cpuinfo && echo JP2K_EXPECT_AVX512=1 >> "$GITHUB_ENV" || echo JP2K_EXPECT_AVX512=0 >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: .github/ci/Dockerfile
+          target: fuzz
+          cache-from: type=gha,scope=jp2k-rs-fuzz
+          cache-to: type=gha,mode=max,scope=jp2k-rs-fuzz
+          load: true
+          push: false
+          tags: jp2k-fuzz:local
+      # The corpus is kept between runs: restored here, copied into the container, copied back
+      # out and saved, so a run goes on from where the last one stopped. One cache per target and
+      # SIMD mode; the newest is restored.
+      - id: corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ matrix.simd }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-${{ matrix.simd }}-
+      # docker create + start, not a RUN layer: a BuildKit cache hit would skip the fuzzing.
+      # Seeds: the jp2k-go testdata/fuzz entries (tests/fuzz/seeds) and the fixtures; new inputs go to
+      # the first corpus dir. -malloc_limit_mb is the backstop; the targets cap the limits they pass
+      # at 256 MB, and decode_limits asserts that the output stays within the limits.
+      - run: |
+          mkdir -p corpus/${{ matrix.target }}
+          docker create --name fuzz -e MAX_TOTAL_TIME -e JP2K_EXPECT_AVX512 -e TARGET=${{ matrix.target }} -e JP2K_SIMD=${{ matrix.simd == 'scalar' && 'scalar' || 'auto' }} jp2k-fuzz:local \
+            sh -c 'cargo +nightly fuzz run --fuzz-dir tests/fuzz $TARGET tests/fuzz/corpus/$TARGET tests/fuzz/seeds tests/data -- -max_len=65536 -max_total_time=$MAX_TOTAL_TIME -timeout=20 -rss_limit_mb=2048 -malloc_limit_mb=512'
+          docker cp corpus fuzz:/src/tests/fuzz/
+          docker start -a fuzz
+      - if: failure()
+        run: docker cp fuzz:/src/tests/fuzz/artifacts/${{ matrix.target }} ./crashers
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crashers-${{ matrix.target }}-${{ matrix.simd }}
+          path: crashers
+      - if: always()
+        run: docker cp fuzz:/src/tests/fuzz/corpus/${{ matrix.target }}/. corpus/${{ matrix.target }}/ || true
+      - if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ matrix.simd }}-${{ github.run_id }}
+
+  # The NEON kernels: the simd_kernels target, fuzzed natively on an arm64 runner. It waits for
+  # the matrix, so no more than max-parallel (2) fuzz jobs run at once.
+  fuzz-arm64:
+    needs: fuzz
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      MAX_TOTAL_TIME: ${{ inputs.max_total_time || '600' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { lfs: false }
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: .github/ci/Dockerfile
+          target: fuzz
+          cache-from: type=gha,scope=jp2k-rs-fuzz-arm64
+          cache-to: type=gha,mode=max,scope=jp2k-rs-fuzz-arm64
+          load: true
+          push: false
+          tags: jp2k-fuzz-arm64:local
+      # The corpus is kept between runs, as for the x86 jobs.
+      - id: corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus
+          key: fuzz-corpus-simd_kernels-arm64-${{ github.run_id }}
+          restore-keys: fuzz-corpus-simd_kernels-arm64-
+      - run: |
+          mkdir -p corpus/simd_kernels
+          docker create --name fuzz -e MAX_TOTAL_TIME -e TARGET=simd_kernels jp2k-fuzz-arm64:local \
+            sh -c 'cargo +nightly fuzz run --fuzz-dir tests/fuzz $TARGET tests/fuzz/corpus/$TARGET tests/fuzz/seeds tests/data -- -max_len=65536 -max_total_time=$MAX_TOTAL_TIME -timeout=20 -rss_limit_mb=2048 -malloc_limit_mb=512'
+          docker cp corpus fuzz:/src/tests/fuzz/
+          docker start -a fuzz
+      - if: failure()
+        run: docker cp fuzz:/src/tests/fuzz/artifacts/simd_kernels ./crashers
+      - if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crashers-simd_kernels-arm64
+          path: crashers
+      - if: always()
+        run: docker cp fuzz:/src/tests/fuzz/corpus/simd_kernels/. corpus/simd_kernels/ || true
+      - if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus
+          key: fuzz-corpus-simd_kernels-arm64-${{ github.run_id }}

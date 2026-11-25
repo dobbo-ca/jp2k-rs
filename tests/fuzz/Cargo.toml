@@ -1,0 +1,99 @@
+[package]
+name = "jp2k-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+jp2k = { path = "../.." }
+
+# Not part of the root package: only this crate may depend on libfuzzer-sys.
+[workspace]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decode_limits"
+path = "fuzz_targets/decode_limits.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reader"
+path = "fuzz_targets/reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "region"
+path = "fuzz_targets/region.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "components"
+path = "fuzz_targets/components.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codestream"
+path = "fuzz_targets/codestream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "markers"
+path = "fuzz_targets/markers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tier2"
+path = "fuzz_targets/tier2.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tier1"
+path = "fuzz_targets/tier1.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mq"
+path = "fuzz_targets/mq.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "threads"
+path = "fuzz_targets/threads.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "simd_kernels"
+path = "fuzz_targets/simd_kernels.rs"
+test = false
+doc = false
+bench = false

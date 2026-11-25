@@ -1,0 +1,18 @@
+[package]
+name = "jp2k"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+description = "JPEG 2000 decoder (J2K codestreams and JP2 files). Rust port of dobbo-ca/jp2k-go."
+publish = false
+# The Go oracle with its upstream sources, the bigtiles fixture and the fuzz crate are not part of the package.
+exclude = ["tests/parity", "tests/fuzz"]
+
+[dependencies]
+# Worker pool: the caller's, the crate's lazy shared one, or a call's own. See docs/threading.md (Dependencies).
+rayon = "1.11"
+
+# The decoder tests run real images: keep them fast (overflow checks stay on).
+[profile.dev]
+opt-level = 2

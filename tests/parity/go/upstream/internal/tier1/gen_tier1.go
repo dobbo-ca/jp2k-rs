@@ -1,0 +1,347 @@
+//go:build ignore
+
+// gen_tier1 writes tier1_passes.go, the MQ coding passes. Each pass
+// open-codes the MQ decision (Go will not inline it; a call spills every
+// live register) and unrolls a full stripe's four rows so every shift
+// and neighbour update is a constant, as OpenJPEG's t1.c macros do.
+// Run with go generate.
+package main
+
+import (
+	"bytes"
+	"fmt"
+	"go/format"
+	"log"
+	"os"
+	"strings"
+)
+
+// decide is DECODE (T.800 C.3.2, C.3.3) of context ctx into bit on the
+// pass's register copies a, c and ct.
+func decide(ctx string) string {
+	return strings.ReplaceAll(`{
+	w := ctxs[CTX]
+	qe := uint32(w)
+	a -= qe
+	hi := uint64(qe) << 48
+	// Branch-free: l is set when c falls in the LPS sub-interval, x when
+	// the LPS is decoded (the conditional exchange included). Without
+	// an exchange a stays >= 0x8000 > qe, so x, and the shift n below,
+	// come out 0.
+	var l, x uint32
+	cl := c - hi
+	if c < hi {
+		l = 1
+	} else {
+		c = cl
+	}
+	if a < qe {
+		x = 1
+	}
+	x ^= l
+	if l != 0 {
+		a = qe
+	}
+	bit = uint32(w>>48)&1 ^ x
+	// Unconditional load: the compiler picks the successor with a CSEL,
+	// not a branch.
+	nw := mqW[w>>(32+8*(x&1))&127]
+	if a&0x8000 == 0 {
+		w = nw
+	}
+	ctxs[CTX] = w
+	n := uint(bits.LeadingZeros32(a)-16) & 15
+	if n > ct {
+		c, ct = mq.fill(c, ct)
+	}
+	a, c, ct = a<<n, c<<n, ct-n
+}
+`, "CTX", ctx)
+}
+
+// decideFast is decide minus the store for a no-renorm MPS.
+func decideFast(ctx string) string {
+	return strings.ReplaceAll(`if w := ctxs[CTX]; c >= uint64(uint32(w))<<48 && a >= uint32(w)+0x8000 {
+	a, c, bit = a-uint32(w), c-uint64(uint32(w))<<48, uint32(w>>48)&1
+} else `, "CTX", ctx) + decide(ctx)
+}
+
+// row holds the expressions for one stripe row: ci is its index, sh its
+// flags shift (3ci), off its offset in out from the stripe's column; k
+// is the index as a constant, -1 in the loop over ci.
+type row struct {
+	ci, sh, off string
+	k           int
+}
+
+func constRow(ci int) row {
+	off := "0"
+	if ci > 0 {
+		off = fmt.Sprintf("%d*w", ci)
+	}
+	return row{fmt.Sprint(ci), fmt.Sprint(3 * ci), off, ci}
+}
+
+var varRow = row{"ci", "sh", "int(ci)*w", -1}
+
+// sign decodes row r's sign and marks it significant, the shared tail of
+// a zero-coding hit in SPP and cleanup.
+func sign(r row) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("e := scLUT[scIndex(f, fl[i-1], fl[i+1], %s)]\ncx := e >> 1 & 31\n", r.ci))
+	b.WriteString(decide("cx"))
+	if r == varRow {
+		b.WriteString("f = t.sig(f, i, ci, bit^uint32(e&1), vsc && ci == 0)\n")
+	} else {
+		// t.sig with ci constant.
+		b.WriteString("s := bit ^ uint32(e&1)\n")
+		b.WriteString(fmt.Sprintf("fl[i-1] |= 1 << %d\nfl[i+1] |= 1 << %d\n", 5+3*r.k, 3+3*r.k))
+		switch r.k {
+		case 0:
+			b.WriteString("if !vsc {\nfl[i-fs] |= s<<31 | 1<<16\nfl[i-fs-1] |= 1 << 17\nfl[i-fs+1] |= 1 << 15\n}\n")
+		case 3:
+			b.WriteString("fl[i+fs] |= s<<18 | 1<<1\nfl[i+fs-1] |= 1 << 2\nfl[i+fs+1] |= 1\n")
+		}
+		b.WriteString(fmt.Sprintf("f |= (s<<t1Chi | t1Sig) << %s\n", r.sh))
+	}
+	b.WriteString(fmt.Sprintf("out[o+%s] |= one\n", r.off))
+	return b.String()
+}
+
+// signPre: sign with the context load hoisted.
+func signPre(r row) string {
+	var b strings.Builder
+	b.WriteString(strings.Replace(decide("sx"), "w := ctxs[sx]", "w := sw", 1))
+	b.WriteString("s := bit ^ uint32(e&1)\n")
+	b.WriteString(fmt.Sprintf("fl[i-1] |= 1 << %d\nfl[i+1] |= 1 << %d\n", 5+3*r.k, 3+3*r.k))
+	switch r.k {
+	case 0:
+		b.WriteString("if !vsc {\nfl[i-fs] |= s<<31 | 1<<16\nfl[i-fs-1] |= 1 << 17\nfl[i-fs+1] |= 1 << 15\n}\n")
+	case 3:
+		b.WriteString("fl[i+fs] |= s<<18 | 1<<1\nfl[i+fs-1] |= 1 << 2\nfl[i+fs+1] |= 1\n")
+	}
+	b.WriteString(fmt.Sprintf("f |= (s<<t1Chi | t1Sig) << %s\n", r.sh))
+	b.WriteString(fmt.Sprintf("out[o+%s] |= one\n", r.off))
+	return b.String()
+}
+
+func spStep(r row) string {
+	if r != varRow {
+		return fmt.Sprintf(`if f>>%[1]s&(t1Sig|t1Pi) == 0 && f>>%[1]s&t1SigNb != 0 {
+	cx := zc[f>>%[1]s&0x1FF] & 31
+	e := scLUT[scIndex(f, fl[i-1], fl[i+1], %[4]d)]
+	sx := e >> 1 & 31
+	sw := ctxs[sx]
+	%[2]s
+	if bit != 0 {
+		%[3]s
+	}
+	f |= t1Pi << %[1]s
+}
+`, r.sh, decide("cx"), signPre(r), r.k)
+	}
+	return fmt.Sprintf(`if f>>%[1]s&(t1Sig|t1Pi) == 0 && f>>%[1]s&t1SigNb != 0 {
+	cx := zc[f>>%[1]s&0x1FF] & 31
+	%[2]s
+	if bit != 0 {
+		%[3]s
+	}
+	f |= t1Pi << %[1]s
+}
+`, r.sh, decide("cx"), sign(r))
+}
+
+func mrStep(r row) string {
+	return fmt.Sprintf(`if f>>%[1]s&(t1Sig|t1Pi) == t1Sig {
+	// 14/15 are swapped vs T.800 Table D-2 (pdf.js labelling); a
+	// consistent bijection, decode-identical.
+	cx := uint8(16)
+	if f>>%[1]s&t1Mu == 0 {
+		cx = 15
+		if f>>%[1]s&t1SigNb != 0 {
+			cx = 14
+		}
+	}
+	%[2]s
+	out[o+%[3]s] |= int32(bit) << (uint(plane) & 31)
+	f |= t1Mu << %[1]s
+}
+`, r.sh, decide("cx&31"), r.off)
+}
+
+func clStep(r row) string {
+	return fmt.Sprintf(`if f>>%[1]s&(t1Sig|t1Pi) == 0 {
+	cx := zc[f>>%[1]s&0x1FF] & 31
+	%[2]s
+	if bit != 0 {
+		%[3]s
+	}
+}
+`, r.sh, decideFast("cx"), sign(r))
+}
+
+const header = `// Code generated by gen_tier1.go; DO NOT EDIT.
+
+package tier1
+
+import "math/bits"
+`
+
+func main() {
+	var b bytes.Buffer
+	b.WriteString(header)
+
+	unroll := func(step func(row) string) string {
+		var s strings.Builder
+		for ci := 0; ci < 4; ci++ {
+			s.WriteString(step(constRow(ci)))
+		}
+		return s.String()
+	}
+	loop := func(step func(row) string) string {
+		return "for ; ci < rows; ci++ {\nsh := 3 * ci & 15 // < 32: no shift-overflow check\n" + step(varRow) + "}\n"
+	}
+
+	fmt.Fprintf(&b, `
+// significancePropagationPass is T.800 D.3.1: for every not-yet-significant
+// sample with at least one significant neighbour, decode a zero-coding
+// bit and, on a hit, a sign. Processed in 4-row stripes, column-major
+// within a stripe (T.800 Figure D.6). Magnitude bits accumulate in out.
+func (t *State) significancePropagationPass(mq *mqDecoder, out []int32, orientation, plane int, vsc bool) {
+	fl, w, fs := t.flags, t.w, t.fs
+	zc := &zcLUT[orientation&3]
+	ctxs := &t.ctxs
+	one := int32(1) << uint(plane)
+	a, c, ct := mq.a, mq.c, mq.ct
+	var bit uint32
+	for y0 := 0; y0 < t.h; y0 += 4 {
+		rows := uint(min(4, t.h-y0))
+		i0 := t.col(0, y0)
+		for x, f := range fl[i0 : i0+w] {
+			// f>>17 moves each row's pi onto its sigma bit.
+			if f == 0 || (f|f>>17)&t1SigCol == t1SigCol {
+				continue
+			}
+			i, o := i0+x, y0*w+x
+			if rows == 4 {
+				%s
+			} else {
+				ci := uint(0)
+				%s
+			}
+			fl[i] = f
+		}
+	}
+	mq.a, mq.c, mq.ct = a, c, ct
+}
+`, unroll(spStep), loop(spStep))
+
+	fmt.Fprintf(&b, `
+// magnitudeRefinementPass is T.800 D.3.3: every sample already
+// significant, but not newly so this plane, contributes one more
+// magnitude bit.
+func (t *State) magnitudeRefinementPass(mq *mqDecoder, out []int32, plane int) {
+	fl, w := t.flags, t.w
+	ctxs := &t.ctxs
+	a, c, ct := mq.a, mq.c, mq.ct
+	var bit uint32
+	for y0 := 0; y0 < t.h; y0 += 4 {
+		rows := uint(min(4, t.h-y0))
+		i0 := t.col(0, y0)
+		for x, f := range fl[i0 : i0+w] {
+			if f&t1SigCol&^(f>>17) == 0 {
+				continue // no row significant and not yet visited
+			}
+			i, o := i0+x, y0*w+x
+			if rows == 4 {
+				%s
+			} else {
+				ci := uint(0)
+				%s
+			}
+			fl[i] = f
+		}
+	}
+	mq.a, mq.c, mq.ct = a, c, ct
+}
+`, unroll(mrStep), loop(mrStep))
+
+	fmt.Fprintf(&b, `
+// cleanupPass is T.800 D.3.4: codes everything the first two passes
+// skipped, then clears pi for the next bit-plane. A full 4-row stripe
+// column with no significance anywhere in its neighbourhood (a zero
+// flags word) is coded with one run-length decision (context 17)
+// instead of four zero-coding decisions; a hit is followed by a 2-bit
+// uniform-context (18) row index, MSB first, that pinpoints the first
+// significant sample without spending a further ZC bit on it. A partial
+// last stripe never uses run-length coding.
+// cleanupPass returns true if segsym is set and the 4-bit marker decoded
+// at the end doesn't match the expected 0b1010: per OpenJPEG, that is a decode-and-discard signal, not a
+// hard error, so callers are free to ignore the return value.
+func (t *State) cleanupPass(mq *mqDecoder, out []int32, orientation, plane int, vsc, segsym bool) bool {
+	fl, w, fs := t.flags, t.w, t.fs
+	zc := &zcLUT[orientation&3]
+	ctxs := &t.ctxs
+	one := int32(1) << uint(plane)
+	a, c, ct := mq.a, mq.c, mq.ct
+	var bit uint32
+	for y0 := 0; y0 < t.h; y0 += 4 {
+		rows := uint(min(4, t.h-y0))
+		i0 := t.col(0, y0)
+		for x, f := range fl[i0 : i0+w] {
+			i, o := i0+x, y0*w+x
+			ci := uint(0)
+			if rows == 4 {
+				if f != 0 {
+					if (f|f>>17)&t1SigCol != t1SigCol {
+						%s
+					}
+					fl[i] = f &^ t1PiCol
+					continue
+				}
+				// MPS without renorm: context unchanged.
+				if w := ctxs[ctxRunLength]; w>>48&1 == 0 {
+					qe := uint32(w)
+					if hi := uint64(qe) << 48; c >= hi && a >= qe+0x8000 {
+						a, c = a-qe, c-hi
+						continue
+					}
+				}
+				%s
+				if bit == 0 {
+					continue // whole column stays insignificant
+				}
+				for k := 0; k < 2; k++ {
+					%s
+					ci = ci<<1 | uint(bit)
+				}
+				{
+					%s
+				}
+				ci++
+			}
+			%s
+			fl[i] = f &^ t1PiCol
+		}
+	}
+	mq.a, mq.c, mq.ct = a, c, ct
+	if segsym {
+		v := 0
+		for i := 0; i < 4; i++ {
+			v = v<<1 | mq.decodeBit(ctxs[:], ctxUniform)
+		}
+		return v != 0x0a
+	}
+	return false
+}
+`, unroll(clStep), decide("ctxRunLength"), decide("ctxUniform"), sign(varRow), loop(clStep))
+
+	src, err := format.Source(b.Bytes())
+	if err != nil {
+		os.WriteFile("tier1_passes.go", b.Bytes(), 0o644)
+		log.Fatal(err)
+	}
+	if err := os.WriteFile("tier1_passes.go", src, 0o644); err != nil {
+		log.Fatal(err)
+	}
+}
