@@ -617,8 +617,8 @@ fn concurrent_multi_tile_decodes_on_a_full_pool_do_not_deadlock() {
 
 /// The first two tiles of `tests/parity/bigtiles/bigtiles_rgb97.j2k` (RGB 9/7, 5 wavelet levels, 64x64
 /// code-blocks, 1024x1024 tiles) as a 2048x1024 image: 2 tile lanes, so on a pool of 8 (a call
-/// gets 7 threads) a lane that was given its share of the threads runs nested passes (code-block,
-/// wavelet, colour transform and output rows) with 3 or 4 of them, each long enough for them to
+/// gets 8 threads) a lane that was given its share of the threads runs nested passes (code-block,
+/// wavelet, colour transform and output rows) with 4 of them, each long enough for them to
 /// take part.
 fn few_lane_stream() -> Vec<u8> {
     let d = std::fs::read(
