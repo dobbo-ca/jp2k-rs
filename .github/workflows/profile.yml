@@ -27,3 +27,30 @@ jobs:
           tags: jp2k-profile:local
       - run: |
           docker run --rm jp2k-profile:local sh tests/parity/profile.sh vsi512_dense.j2k g1_colr.j2c g64_97.j2k fl_empty.j2k fl_sparse.j2k fl_dense.j2k | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # Not a check: perf stat and the flat perf profile of the bigtiles fixture at one thread, Go
+  # against Rust, per op (tests/parity/perf.sh), in the job summary. The binaries are built in
+  # the image and run on the runner, where perf can read the counters.
+  perf:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: { lfs: false }
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: .github/ci/Dockerfile
+          target: perf
+          cache-from: type=gha,scope=jp2k-rs-perf
+          cache-to: type=gha,mode=max,scope=jp2k-rs-perf
+          load: true
+          push: false
+          tags: jp2k-perf:local
+      - run: |
+          docker create --name perf jp2k-perf:local && docker cp perf:/out ./out
+          sudo apt-get update -q
+          sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y -q linux-tools-azure
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
+          sh tests/parity/perf.sh out | tee -a "$GITHUB_STEP_SUMMARY"

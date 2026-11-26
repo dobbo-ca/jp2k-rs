@@ -20,10 +20,10 @@ set -eu
 export LC_ALL=C
 n=${1:-5}
 oracle=${ORACLE:-oracle} bench=${BENCH:-bench}
-grep -m1 'model name' /proc/cpuinfo >&2 || true
-grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx2|fma|bmi2|avx512(f|bw|vl))$' | tr '\n' ' ' >&2 || true
-echo >&2
-echo "cpus: $(nproc)" >&2 || true
+# The runner, in the job summary: the ratios move with the CPU model (docs/benchmarks.md).
+echo "Runner: $(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1), $(nproc) CPUs," \
+  "$(grep -m1 '^flags' /proc/cpuinfo | tr ' ' '\n' | grep -E '^(avx2|fma|bmi2|avx512(f|bw|vl))$' | tr '\n' ' ')"
+echo
 # The fixtures plus tests/parity/bigtiles: an 8192x4096 RGB 9/7 image in 32 tiles of 1024x1024 (made with
 # `opj_compress -t 1024,1024 -I -n 6 -b 64,64 -r 40` from an ImageMagick plasma), where `tile_lanes`
 # gives 2 lanes, well below the threads of a larger host: the few-lane case no other fixture is.
