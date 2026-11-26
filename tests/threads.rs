@@ -700,8 +700,8 @@ fn few_lanes_use_every_thread_and_give_the_serial_bytes() {
     let data = few_lane_stream();
     let want = jp2k::decode(&data, &with(1), &nc()).unwrap();
     let pool = ThreadPool::new(8).unwrap();
-    // A pool of 8 gives a call at most 7 threads.
-    for (max_threads, cap) in [(3usize, 3usize), (8, 7)] {
+    // A pool of 8 gives a call at most 8 threads, the caller included.
+    for (max_threads, cap) in [(3usize, 3usize), (8, 8)] {
         // A worker may come late to a short pass, but not to every pass of a big decode.
         let mut peak = 0;
         for _ in 0..5 {
