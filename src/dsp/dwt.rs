@@ -579,7 +579,9 @@ fn col_pass<T: Copy>(
     cols: Option<ColPass<'_, T>>,
 ) {
     if let Some(cols) = cols {
-        cols(&mut p[x0..], stride, bw, &mut blk[..bw * rh], rh, cas_y, hi);
+        // A wide sweep (`inverse_dwt`'s `wide_low`) needs only 5 rows of `bw`.
+        let n = (bw * rh).min(blk.len());
+        cols(&mut p[x0..], stride, bw, &mut blk[..n], rh, cas_y, hi);
         return;
     }
     for y in 0..rh {
@@ -620,6 +622,11 @@ fn col_pass<T: Copy>(
 /// sample is lifted by the same operations in the same order, so the result does not depend on
 /// `nw`. Each thread's scratch is charged to `budget`; when it does not fit for every thread the
 /// pass uses the threads it does.
+///
+/// `wide_low`: `cols` sweeps a level without high bands in place in 5 rows of scratch
+/// (`cols_97`'s `sweep_low`). The one-thread vertical pass then gives it the level's whole width
+/// at once, as Go's `inverseDWT` does, not `col_block` columns: each row is read in one
+/// contiguous run, not in pieces a plane row apart.
 fn inverse_dwt<T: Copy + Default + Send + Sample>(
     p: &mut [T],
     stride: usize,
@@ -631,6 +638,7 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
     kernel: impl Fn(&mut [T], usize, usize, &mut [T], bool) + Sync,
     col_block: usize,
     cols: Option<ColPass<'_, T>>,
+    wide_low: bool,
 ) -> Result<()> {
     if rects.len() < 2 {
         return Ok(());
@@ -834,10 +842,15 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                 continue;
             }
             let s = &mut lines[0];
+            let block = if wide_low && !hi && rh > 1 && rw.saturating_mul(5) <= s.blk.len() {
+                rw
+            } else {
+                col_block
+            };
             let mut x0 = 0;
             while x0 < rw {
                 check_cancel(cancel)?;
-                let bw = col_block.min(rw - x0);
+                let bw = block.min(rw - x0);
                 col_pass(
                     p,
                     stride,
@@ -886,6 +899,7 @@ pub fn inverse_dwt_53(
         |mal, sn, cas, out, _| row_53(mal, sn, cas, out),
         COL_BLOCK_97,
         Some(&cols),
+        false,
     )
 }
 
@@ -915,6 +929,7 @@ pub fn inverse_dwt_97(
             },
             COL_BLOCK,
             None,
+            false,
         );
     }
     let cols = |p: &mut [f32], stride, bn, b: &mut [f32], n, cas, hi| {
@@ -931,6 +946,7 @@ pub fn inverse_dwt_97(
         |mal, sn, cas, out, hi| row_97(mal, sn, cas, out, r, hi),
         COL_BLOCK_97,
         Some(&cols),
+        true,
     )
 }
 
@@ -1243,6 +1259,7 @@ mod tests {
                             },
                             COL_BLOCK,
                             None,
+                            false,
                         )
                         .unwrap();
                         let mut got = data;
@@ -1302,6 +1319,7 @@ mod tests {
                     },
                     COL_BLOCK,
                     None,
+                    false,
                 )
                 .unwrap();
                 let mut got = data;
