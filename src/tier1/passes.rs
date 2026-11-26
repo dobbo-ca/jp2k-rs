@@ -19,26 +19,17 @@ macro_rules! decide_w {
         let qe = w as u32;
         $a = $a.wrapping_sub(qe);
         let hi = (qe as u64) << 48;
-        let mut l = 0u32;
-        if $c < hi {
-            l = 1;
-        } else {
-            $c -= hi;
-        }
-        let mut x = 0u32;
-        if $a < qe {
-            x = 1;
-        }
-        x ^= l;
-        if l != 0 {
-            $a = qe;
-        }
+        // The three picks below depend on the coded data, so a branch on them mispredicts often:
+        // `select_unpredictable` asks for a conditional move, as Go's compiler emits for them.
+        let lps = $c < hi;
+        let l = lps as u32;
+        $c = std::hint::select_unpredictable(lps, $c, $c.wrapping_sub(hi));
+        let x = ($a < qe) as u32 ^ l;
+        $a = std::hint::select_unpredictable(lps, qe, $a);
         let bit = ((w >> 48) as u32 & 1) ^ x;
         // Unconditional load: the successor is picked with a select, not a branch.
         let nw = MQ_W[((w >> (32 + 8 * (x & 1))) & 127) as usize];
-        if $a & 0x8000 == 0 {
-            w = nw;
-        }
+        w = std::hint::select_unpredictable($a & 0x8000 == 0, nw, w);
         $ctxs[cx] = w;
         let n = ($a.leading_zeros().wrapping_sub(16)) & 15;
         if n > $ct {
