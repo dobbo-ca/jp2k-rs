@@ -106,6 +106,9 @@ impl State {
     /// T.800 D.3.1: for every not-yet-significant sample with at least one significant
     /// neighbour, decode a zero-coding bit and, on a hit, a sign. Processed in 4-row stripes,
     /// column-major within a stripe (T.800 Figure D.6). Magnitude bits accumulate in `out`.
+    /// Each pass is a function of its own, as in Go: inlined into `decode`, the three share one
+    /// register allocation.
+    #[inline(never)]
     pub(super) fn significance_propagation_pass(
         &mut self,
         mq: &mut MqDecoder,
@@ -176,6 +179,7 @@ impl State {
 
     /// T.800 D.3.3: every sample already significant, but not newly so this plane, contributes
     /// one more magnitude bit.
+    #[inline(never)]
     pub(super) fn magnitude_refinement_pass(
         &mut self,
         mq: &mut MqDecoder,
@@ -244,6 +248,7 @@ impl State {
     /// it. A partial last stripe never uses run-length coding. Returns true if `segsym` is set
     /// and the 4-bit marker decoded at the end doesn't match the expected 0b1010: per OpenJPEG
     /// that is a decode-and-discard signal, not a hard error.
+    #[inline(never)]
     pub(super) fn cleanup_pass(
         &mut self,
         mq: &mut MqDecoder,
