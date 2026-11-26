@@ -366,8 +366,8 @@ fn pool_region_and_components_stay_within_max_threads() {
     }
 }
 
-/// Many decodes on different threads share one small pool (more than 2 workers, so a call gets
-/// one fewer than the pool and runs in parallel): no deadlock, the same bytes.
+/// Many decodes on different threads share one small pool (3 workers, each call up to all of
+/// them, in parallel): no deadlock, the same bytes.
 #[test]
 fn concurrent_decodes_share_one_pool() {
     let names = ["g1_colr.j2c", "g64_multitile.j2k", "vsi512_dense.j2k"];
@@ -491,7 +491,7 @@ fn every_mode_is_identical_and_stays_within_max_threads() {
 }
 
 /// A pool of 2 workers with `max_threads` 2 gives the call both: a decode big enough to
-/// parallelise runs on a worker (a pool of more than 2 workers gives one fewer than it has).
+/// parallelise runs on a worker.
 #[test]
 fn a_two_worker_pool_runs_a_two_thread_decode_in_parallel() {
     let data = read("fl_dense.j2k");
@@ -617,8 +617,8 @@ fn concurrent_multi_tile_decodes_on_a_full_pool_do_not_deadlock() {
 
 /// The first two tiles of `tests/parity/bigtiles/bigtiles_rgb97.j2k` (RGB 9/7, 5 wavelet levels, 64x64
 /// code-blocks, 1024x1024 tiles) as a 2048x1024 image: 2 tile lanes, so on a pool of 8 (a call
-/// gets 7 threads) a lane that was given its share of the threads runs nested passes (code-block,
-/// wavelet, colour transform and output rows) with 3 or 4 of them, each long enough for them to
+/// gets 8 threads) a lane that was given its share of the threads runs nested passes (code-block,
+/// wavelet, colour transform and output rows) with 4 of them, each long enough for them to
 /// take part.
 fn few_lane_stream() -> Vec<u8> {
     let d = std::fs::read(
@@ -700,8 +700,8 @@ fn few_lanes_use_every_thread_and_give_the_serial_bytes() {
     let data = few_lane_stream();
     let want = jp2k::decode(&data, &with(1), &nc()).unwrap();
     let pool = ThreadPool::new(8).unwrap();
-    // A pool of 8 gives a call at most 7 threads.
-    for (max_threads, cap) in [(3usize, 3usize), (8, 7)] {
+    // A pool of 8 gives a call at most 8 threads, the caller included.
+    for (max_threads, cap) in [(3usize, 3usize), (8, 8)] {
         // A worker may come late to a short pass, but not to every pass of a big decode.
         let mut peak = 0;
         for _ in 0..5 {

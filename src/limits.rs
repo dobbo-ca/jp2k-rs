@@ -25,9 +25,8 @@ pub struct Limits {
     /// The most OS threads one call uses, the calling thread included. 1 runs everything on the
     /// calling thread and never spawns one. 0 is treated as 1. The threads are split across
     /// tiles, code-blocks, wavelet rows and columns and output rows, never more than this in
-    /// total. A call on a pool (its own, the caller's or the crate's shared one) uses at most this
-    /// many, and, when the pool has more than 2 threads, at most the pool's size minus 1; a pool
-    /// of 1 or 2 threads gives all of them. Output is the same bytes for every value. Default
+    /// total. A call on the caller's pool or the crate's shared one uses at most this many and at
+    /// most the pool's size, as Go uses `GOMAXPROCS`. Output is the same bytes for every value. Default
     /// `std::thread::available_parallelism()`, or 1 if that is unknown.
     pub max_threads: usize,
     /// Most pixels (width times height) of the decoded image or region; over it a call fails
@@ -100,17 +99,14 @@ impl Account {
     }
 
     /// `n` threads, or fewer if the pool cannot supply them: 1 with no pool. A caller's or the
-    /// shared pool of more than 2 workers gives one fewer than its workers, so a pass never needs
-    /// every CPU of a pool sized to them (bench: all of them made default-thread decodes of 4
-    /// Mpixel images up to twice as slow on a shared machine); a pool of 1 or 2 workers gives
-    /// them all, so a 2-worker pool and a 2-CPU host still decode in parallel. A pool built for
-    /// the call gives its workers and the caller.
+    /// shared pool gives as many as it has workers, the caller included (the caller and
+    /// `threads - 1` workers), as Go's `GOMAXPROCS` does; a pool built for the call gives its
+    /// workers and the caller.
     pub(crate) fn cap_threads(&self, n: usize) -> usize {
         match &self.pool {
             None => 1,
             Some(p) if self.own_pool => n.min(p.threads() + 1),
-            Some(p) if p.threads() <= 2 => n.min(p.threads()),
-            Some(p) => n.min(p.threads() - 1),
+            Some(p) => n.min(p.threads()),
         }
     }
 

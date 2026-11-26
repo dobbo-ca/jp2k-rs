@@ -16,8 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 /// call then runs its parallel passes on these threads instead of starting new ones, so small
 /// images use threads too. A call without one uses the crate's lazy shared pool (see
 /// `Options::pool`); a caller's pool always wins. `Limits::max_threads` still caps the threads one
-/// call uses, the caller included, and a call on a pool of more than 2 threads uses at most the
-/// pool's size minus 1 (a pool of 1 or 2 threads gives them all). Clones share the threads.
+/// call uses, the caller included, and a call on a pool uses at most the pool's size. Clones share
+/// the threads.
 #[derive(Clone, Debug)]
 pub struct ThreadPool(pub(crate) Arc<rayon::ThreadPool>);
 

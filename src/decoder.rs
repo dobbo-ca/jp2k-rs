@@ -3035,8 +3035,8 @@ fn raster_of(d: Decoded) -> Result<Raster> {
 ///
 /// Limits (`opts.limits`): `max_alloc` caps the peak working memory of the call, all threads
 /// together; `max_threads` caps its threads, the calling thread included (1 spawns none, a pooled call,
-/// the shared pool included, uses at most that many and at most the pool's size minus 1 when the
-/// pool has more than 2 threads, and the bytes are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
+/// the shared pool included, uses at most that many and at most the pool's size, and the bytes
+/// are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
 /// the size of the result. `cancel` is checked per tile, code-block and row on every thread.
 ///
 /// Call this from a plain thread when `cancel` matters. From a worker thread of another rayon pool
@@ -3063,8 +3063,8 @@ pub fn decode(data: &[u8], opts: &Options, cancel: &AtomicBool) -> Result<Raster
 ///
 /// Limits (`opts.limits`): `max_input` caps the bytes read, charged to `max_alloc`, which caps the peak working memory of the call, all threads
 /// together; `max_threads` caps its threads, the calling thread included (1 spawns none, a pooled call,
-/// the shared pool included, uses at most that many and at most the pool's size minus 1 when the
-/// pool has more than 2 threads, and the bytes are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
+/// the shared pool included, uses at most that many and at most the pool's size, and the bytes
+/// are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
 /// the size of the result. `cancel` is checked per tile, code-block and row on every thread.
 ///
 /// # Errors
@@ -3146,8 +3146,8 @@ fn read_all<R: Read>(mut r: R, limits: &Limits, cancel: &AtomicBool) -> Result<V
 ///
 /// Limits (`opts.limits`): `max_alloc` caps the peak working memory of the call, all threads
 /// together; `max_threads` caps its threads, the calling thread included (1 spawns none, a pooled call,
-/// the shared pool included, uses at most that many and at most the pool's size minus 1 when the
-/// pool has more than 2 threads, and the bytes are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
+/// the shared pool included, uses at most that many and at most the pool's size, and the bytes
+/// are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
 /// the size of the result. `cancel` is checked per tile, code-block and row on every thread.
 ///
 /// # Errors
@@ -3229,8 +3229,8 @@ fn decode_region_inner(
 ///
 /// Limits (`opts.limits`): `max_alloc` caps the peak working memory of the call, all threads
 /// together; `max_threads` caps its threads, the calling thread included (1 spawns none, a pooled call,
-/// the shared pool included, uses at most that many and at most the pool's size minus 1 when the
-/// pool has more than 2 threads, and the bytes are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
+/// the shared pool included, uses at most that many and at most the pool's size, and the bytes
+/// are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
 /// the size of the result. `cancel` is checked per tile, code-block and row on every thread.
 ///
 /// # Errors
@@ -3264,8 +3264,8 @@ pub fn decode_region(
 ///
 /// Limits (`opts.limits`): `max_alloc` caps the peak working memory of the call, all threads
 /// together; `max_threads` caps its threads, the calling thread included (1 spawns none, a pooled call,
-/// the shared pool included, uses at most that many and at most the pool's size minus 1 when the
-/// pool has more than 2 threads, and the bytes are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
+/// the shared pool included, uses at most that many and at most the pool's size, and the bytes
+/// are the same for every value); `max_pixels`, `max_width`, `max_height` and `max_output` cap
 /// the size of the result. `cancel` is checked per tile, code-block and row on every thread.
 ///
 /// # Errors
@@ -3550,7 +3550,7 @@ impl<'a> Image<'a> {
     ///
     /// Limits (`opts.limits`, kept for every call on the image): `max_alloc` caps the working memory of
     /// this call and of each later one, `max_threads` the threads each call uses (a pooled call, the shared pool included, at most
-    /// the pool's size minus 1 when the pool has more than 2 threads). `cancel` is checked
+    /// the pool's size). `cancel` is checked
     /// while parsing.
     ///
     /// # Errors
