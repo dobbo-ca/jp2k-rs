@@ -100,17 +100,14 @@ impl Account {
     }
 
     /// `n` threads, or fewer if the pool cannot supply them: 1 with no pool. A caller's or the
-    /// shared pool of more than 2 workers gives one fewer than its workers, so a pass never needs
-    /// every CPU of a pool sized to them (bench: all of them made default-thread decodes of 4
-    /// Mpixel images up to twice as slow on a shared machine); a pool of 1 or 2 workers gives
-    /// them all, so a 2-worker pool and a 2-CPU host still decode in parallel. A pool built for
-    /// the call gives its workers and the caller.
+    /// shared pool gives as many as it has workers, the caller included (the caller and
+    /// `threads - 1` workers), as Go's `GOMAXPROCS` does; a pool built for the call gives its
+    /// workers and the caller.
     pub(crate) fn cap_threads(&self, n: usize) -> usize {
         match &self.pool {
             None => 1,
             Some(p) if self.own_pool => n.min(p.threads() + 1),
-            Some(p) if p.threads() <= 2 => n.min(p.threads()),
-            Some(p) => n.min(p.threads() - 1),
+            Some(p) => n.min(p.threads()),
         }
     }
 
