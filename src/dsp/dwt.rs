@@ -446,7 +446,7 @@ fn sweep_low<R: Rows + ?Sized>(
 
 /// The 9/7 vertical pass over `bn` columns of `p` at once: row `i` of the Mallat layout goes to
 /// row `q` of the interleaved block `b`, so each step of `inverse_1d_97` is a kernel call over a
-/// whole row of the block, and the result goes back to `p`.
+/// whole row of the block; the last two steps write their rows straight to `p`.
 fn cols_97(
     p: &mut [f32],
     stride: usize,
@@ -473,31 +473,24 @@ fn cols_97(
         return;
     }
     let (sn, _) = sn_dn(n, cas);
+    // The gather scales as it copies (Go's `scaleN`); `hi` false: the high rows are zero, and
+    // scaling them changes nothing.
     for i in 0..n {
-        let q = if i < sn {
-            cas + 2 * i
+        let (q, k) = if i < sn {
+            (cas + 2 * i, Some(DWT97_K))
         } else {
-            1 - cas + 2 * (i - sn)
+            (1 - cas + 2 * (i - sn), hi.then_some(DWT97_TWO_INV_K))
         };
-        b[q * bn..(q + 1) * bn].copy_from_slice(&p[i * stride..i * stride + bn]);
+        let (dst, src) = (
+            &mut b[q * bn..(q + 1) * bn],
+            &p[i * stride..i * stride + bn],
+        );
+        match k {
+            Some(k) => simd::scale_to(dst, src, k),
+            None => dst.copy_from_slice(src),
+        }
     }
-    for q in 0..n {
-        // `hi` false: the high rows are zero, and scaling them changes nothing.
-        let k = if q % 2 == cas {
-            DWT97_K
-        } else if hi {
-            DWT97_TWO_INV_K
-        } else {
-            continue;
-        };
-        simd::scale(&mut b[q * bn..(q + 1) * bn], k);
-    }
-    for (par, c) in [
-        (cas, -DWT97_DELTA),
-        (1 - cas, -DWT97_GAMMA),
-        (cas, -DWT97_BETA),
-        (1 - cas, -DWT97_ALPHA),
-    ] {
+    for (par, c) in [(cas, -DWT97_DELTA), (1 - cas, -DWT97_GAMMA)] {
         // The delta step adds multiples of the (zero) high rows to the low rows.
         if !hi && c == -DWT97_DELTA {
             continue;
@@ -507,8 +500,18 @@ fn cols_97(
             lift_row(b, bn, j, ju, jv, |d, u, v| simd::lift(d, u, v, c, r));
         }
     }
-    for q in 0..n {
-        p[q * stride..q * stride + bn].copy_from_slice(&b[q * bn..(q + 1) * bn]);
+    // The last two steps write `p`, whose rows are all in `b` now, instead of `b` and a copy
+    // back (Go's `filter97Cols`): beta into the low rows, then alpha into the high rows from the
+    // low rows of `p`. The same operations on the same values.
+    let mut pr = Strided { p, stride, w: bn };
+    for j in (cas..n).step_by(2) {
+        let (ju, jv) = (mirror(j as i64 - 1, n), mirror(j as i64 + 1, n));
+        let row = |q: usize| &b[q * bn..(q + 1) * bn];
+        simd::lift_to(pr.row_mut(j), row(j), row(ju), row(jv), -DWT97_BETA, r);
+    }
+    for j in (1 - cas..n).step_by(2) {
+        let (dst, u, v) = pr.three(j, mirror(j as i64 - 1, n), mirror(j as i64 + 1, n));
+        simd::lift_to(dst, &b[j * bn..(j + 1) * bn], u, v, -DWT97_ALPHA, r);
     }
 }
 
