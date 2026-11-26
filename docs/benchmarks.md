@@ -40,11 +40,55 @@ numbers below as a regression. Rust / Go, ms per megapixel, 69 files:
 | v4, default threads (not gated) | c0 | 0.99 | 1.05 | |
 | v4, single thread (not gated) | c0 | 1.14 | 1.23 | |
 
-On this runner single-thread `c0` fails the 1.10 gate (bigtiles 1.23, all 1.13), so the bench job
-is red; that is an open item. The decode (`dec`) rows are well inside it. The AVX-512 tier is within
+On this runner single-thread `c0` failed the 1.10 gate (bigtiles 1.23, all 1.13), so the bench job
+was red; the next section has the runs after the fixes. The decode (`dec`) rows are well inside it. The AVX-512 tier is within
 1% of the AVX2 tier here, and the Rust v4 build is about 4% faster on `c0` at default threads (8.39
 against 8.72 ms/Mpixel) and 2% at a single thread. That is close to the run-to-run noise, so this
 run alone is not a reason to recommend v4 flags.
+
+## Hosted runners, before and after the speed fixes
+
+Hosted `ubuntu-24.04` runners change CPU model from run to run, and the Rust / Go ratio moves with
+it, so each run is listed with its CPU. Rust / Go per gated class; "1 thread" and "default" are the
+single-thread and default-threads tables (the no-pool table, also gated, is not listed). The gate
+is 1.10 on every class of the three gated tables.
+
+Before, `main` at the first release (the bench example and oracle unchanged since):
+
+| run | CPU | CPUs | 1 thread bigtiles `c0` | 1 thread all `c0` | default `fl` `dec` / `c0` | gate |
+|---|---|---|---|---|---|---|
+| 45726753219 | AMD EPYC 9V74 | 2 | 1.23 | 1.13 | 1.05 / 0.97 | red |
+| 45730587064 | AMD EPYC 9V74 | 2 | 1.22 | 1.14 | 1.03 / 0.95 | red |
+| 45761367793 | Intel Xeon 6975P-C | 4 | 1.18 | 1.11 | 1.17 / 1.17 | red |
+| 45764444537 | Intel Xeon Platinum 8573C | 4 | 1.19 | 1.12 | 1.20 / 1.11 | red |
+| 45767949597 | Intel Xeon 6975P-C | 4 | 1.16 | 1.09 | 1.16 / 1.18 | red |
+
+The single-thread gap was on every CPU type, so it was the code, not the CPU: the inverse DWT
+swept the zero-high levels of the big tiles in 64-column blocks (each a 4 KB plane row apart), and
+tier-1 had about 17% more branch misses than Go's (`profile.yml`'s perf job, Intel, with
+counters). The `fl` gap at default threads showed only on 4-CPU runners: a pooled call got one
+thread fewer than the pool, 3 on 4 CPUs, where Go uses 4.
+
+After (#2 #4 #6 #8 #9 #10; the before/after of each change, both builds on one runner, is in its
+PR, from `ab.yml`):
+
+| run | `main` | CPU | CPUs | 1 thread bigtiles `c0` | 1 thread all `c0` | default `fl` `dec` / `c0` | gate |
+|---|---|---|---|---|---|---|---|
+| 45781919270 | 3643d10 (#2 #4 #6) | AMD EPYC 9V74 | 4 | 1.15 | 1.08 | 0.99 / 0.92 | red |
+| 45798634318 | efc3785 | AMD EPYC 7763 | 4 | 1.01 | 0.97 | 0.93 / 0.84 | green |
+| 45802374209 | 1767e1b | AMD EPYC 9V74 | 4 | 1.07 | 1.00 | 0.94 / 0.89 | green |
+| 45809001270 | 1767e1b | Intel Xeon 6975P-C | 4 | 0.98 | 0.94 | 0.95 / 0.94 | green |
+
+In each green run the worst gated class is single-thread bigtiles `c0`; every other class is at
+or below 1.00. Single-thread `dec` is 0.65 to 0.78 and default threads 0.62 to 0.95.
+
+What is left on single-thread bigtiles `c0` (perf, Intel, `main` before #8 #9 #10): tier-1's
+branch misses, which #10 cut, and the page faults of the 64 MB output plane, which a free
+`decode_components` allocates for each call while Go's heap reuses the last call's memory (Rust
+system time 0.26 s against Go's 0.19 s over the 12 calls of the profile). A run with glibc's
+transparent huge pages for B (`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, `ab.yml` run 45795226179,
+not in the gate) changed one thread by 0.99 to 1.02 and default threads by 0.94 to 1.01, so the
+faults cost little at one thread. A reused `Decoder` keeps its buffers between calls.
 
 ## Bench of record
 
