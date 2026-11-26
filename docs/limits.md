@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | field | default | unit | error when exceeded |
 |---|---|---|---|
 | `max_alloc` | 4 GiB | bytes | `Error::LimitExceeded` |
-| `max_threads` | `std::thread::available_parallelism()`, or 1; on a host with more than 2 CPUs a call uses at most `available_parallelism - 1` threads on the shared pool (see [threading.md](threading.md)) | threads | none: the call uses fewer |
+| `max_threads` | `std::thread::available_parallelism()`, or 1; a call uses at most the pool's size (see [threading.md](threading.md)) | threads | none: the call uses fewer |
 | `max_pixels` | 2^28 (Go's) | pixels of the result | `Error::LimitExceeded` |
 | `max_width`, `max_height` | `u32::MAX` | pixels of the result | `Error::LimitExceeded` |
 | `max_input` | 4 GiB | bytes a reader entry point reads | `Error::LimitExceeded` |

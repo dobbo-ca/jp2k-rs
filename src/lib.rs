@@ -50,9 +50,8 @@
 //!   call with `max_threads` above 1 uses the crate's shared pool: a `OnceLock` built lazily
 //!   on the first such call, with `std::thread::available_parallelism()` threads and never more,
 //!   and holding no other state. `max_threads` 1 never touches it (it is not even built). Each
-//!   call takes at most `max_threads` threads from the pool, the calling thread included, and,
-//!   when the pool has more than 2 threads, at most one fewer than its size (a pool of 1 or 2
-//!   threads gives them all, so the default on a 2-CPU host still uses 2). If the shared pool cannot be built, the call
+//!   call takes at most `max_threads` threads from the pool, the calling thread included, and at
+//!   most the pool's size, as Go uses `GOMAXPROCS`. If the shared pool cannot be built, the call
 //!   starts one set of workers of its own at entry, sized from the input (none for a small
 //!   one), which every stage shares. The pool changes speed only, not the bytes.
 //! - Cancellation: set the `AtomicBool` passed to the call, from any thread; every thread of
@@ -171,8 +170,8 @@ pub struct Options {
     /// `limits.max_threads` of them, and starts no thread of its own. Without one, a call with
     /// `max_threads` above 1 takes the same from the crate's shared pool: built on first use
     /// (a `OnceLock`), never more than `available_parallelism` threads, holding no other state.
-    /// A pooled call, the shared pool included, uses at most `max_threads` threads and, when the
-    /// pool has more than 2 threads, at most the pool's size minus 1.
+    /// A pooled call, the shared pool included, uses at most `max_threads` threads and at most the
+    /// pool's size.
     /// If that cannot be built, the call starts one pool of its own at entry, sized from the
     /// input, for all its stages. `max_threads` 1 never touches any pool, and never builds the
     /// shared one. The bytes are the same either way.

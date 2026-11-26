@@ -366,8 +366,8 @@ fn pool_region_and_components_stay_within_max_threads() {
     }
 }
 
-/// Many decodes on different threads share one small pool (more than 2 workers, so a call gets
-/// one fewer than the pool and runs in parallel): no deadlock, the same bytes.
+/// Many decodes on different threads share one small pool (3 workers, each call up to all of
+/// them, in parallel): no deadlock, the same bytes.
 #[test]
 fn concurrent_decodes_share_one_pool() {
     let names = ["g1_colr.j2c", "g64_multitile.j2k", "vsi512_dense.j2k"];
@@ -491,7 +491,7 @@ fn every_mode_is_identical_and_stays_within_max_threads() {
 }
 
 /// A pool of 2 workers with `max_threads` 2 gives the call both: a decode big enough to
-/// parallelise runs on a worker (a pool of more than 2 workers gives one fewer than it has).
+/// parallelise runs on a worker.
 #[test]
 fn a_two_worker_pool_runs_a_two_thread_decode_in_parallel() {
     let data = read("fl_dense.j2k");

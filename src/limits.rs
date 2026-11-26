@@ -25,9 +25,8 @@ pub struct Limits {
     /// The most OS threads one call uses, the calling thread included. 1 runs everything on the
     /// calling thread and never spawns one. 0 is treated as 1. The threads are split across
     /// tiles, code-blocks, wavelet rows and columns and output rows, never more than this in
-    /// total. A call on a pool (its own, the caller's or the crate's shared one) uses at most this
-    /// many, and, when the pool has more than 2 threads, at most the pool's size minus 1; a pool
-    /// of 1 or 2 threads gives all of them. Output is the same bytes for every value. Default
+    /// total. A call on the caller's pool or the crate's shared one uses at most this many and at
+    /// most the pool's size, as Go uses `GOMAXPROCS`. Output is the same bytes for every value. Default
     /// `std::thread::available_parallelism()`, or 1 if that is unknown.
     pub max_threads: usize,
     /// Most pixels (width times height) of the decoded image or region; over it a call fails

@@ -35,9 +35,8 @@ and sYCC colour, HT block coding, `MCT=2` and more than 4 components (except thr
   caller holds the bytes, and a region call parses the packet headers of the tiles it touches
   (tiles it misses are not parsed, as in Go, so corruption there is not seen).
 - Go decodes tiles on several goroutines and its `Options.Workers` caps them; here `Limits::max_threads`
-  does (default `available_parallelism`, 1 = no thread; on a host with more than 2 CPUs a call
-  uses at most `available_parallelism - 1` threads on the shared pool, one fewer than Go's default `GOMAXPROCS`,
-  which avoids stalls when every CPU is busy). The threaded stages are the same as Go's:
+  does (default `available_parallelism`, 1 = no thread; a call on the shared pool uses up to
+  `available_parallelism` threads, as many as Go's default `GOMAXPROCS`). The threaded stages are the same as Go's:
   tier-1 code-blocks, the inverse DWT rows and columns, the output rows and the colour transform
   rows, and tile lanes (not with PPM, as in Go). Go gives each lane `procs / len(lanes)` workers, and so does this crate, with one difference: with fewer lanes than threads (and more than one) the lanes run on the caller and `lanes - 1` `std::thread::scope` threads rather than on pool workers (a pool worker that waits for a nested pass can run another call's lane), and the threads they use for nested passes are pool workers, so the call still uses `max_threads` threads at most. Go keeps the lanes past the first within 64 MiB and a quarter of the output (2 lanes for the 1024x1024 tiles of a 33 Mpixel image); this crate allows 512 MiB and half of the ledger that is left, because each pass of a lane's nested threads costs a pool wake and wait of tens of microseconds, which a lane of one thread never pays (the bench's `bigtiles` class). Tier 2
   runs in tile order, one tile at a time, so the tier-2 budgets (and the errors they give) do not
