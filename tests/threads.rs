@@ -298,7 +298,7 @@ fn pooled(pool: &ThreadPool, max_threads: usize) -> Options {
 
 /// With a pool: the same bytes as the serial decode for every pool size and `max_threads`, the
 /// call's participating threads (counted by the ledger, not OS threads) never pass `max_threads`
-/// or the pool's size plus the caller, and `max_threads` 1 (or 0) uses no worker at all.
+/// or the pool's size (the caller included), and `max_threads` 1 (or 0) uses no worker at all.
 #[test]
 fn pool_decodes_are_identical_and_stay_within_max_threads() {
     let nc = nc();
@@ -320,7 +320,7 @@ fn pool_decodes_are_identical_and_stay_within_max_threads() {
                 let got = jp2k::decode(&data, &pooled(&pool, t), &nc).unwrap();
                 assert!(got == want, "{name}: pool {size}, max_threads {t}");
                 let st = jp2k::stats::last();
-                let cap = t.max(1).min(size + 1);
+                let cap = t.max(1).min(size);
                 assert!(
                     st.peak_threads <= cap,
                     "{name}: peak {} with pool {size}, max_threads {t}",
@@ -649,7 +649,7 @@ fn few_lane_stream() -> Vec<u8> {
 /// could pick up B's lane job and not get back to A until B's lane was done).
 ///
 /// The image has to make a lane wait in the pool, or the test passes on the buggy code too: with
-/// 2 lanes and 7 threads, the earlier buggy code gave each lane 3 or 4 threads, and its nested
+/// 2 lanes and 8 threads, the earlier buggy code gave each lane 4 threads, and its nested
 /// passes (tier 1, the wavelet, the colour transform, the output) on this RGB 9/7 image with
 /// code-blocks and 5 levels were real `in_place_scope`s on the pool, whose wait takes any
 /// queued job, B's lane included. A grey image with no wavelet levels and empty packets has no
@@ -691,7 +691,7 @@ fn a_cancelled_decode_does_not_wait_for_another_decode_on_the_pool() {
     }
 }
 
-/// With few lanes for the threads (2 lanes, 7 threads, or 3) the lanes run on the caller and a
+/// With few lanes for the threads (2 lanes, 8 threads, or 3) the lanes run on the caller and a
 /// `std::thread::scope` thread and each gets its share of the threads for its nested passes: the
 /// call uses more threads than lanes (a big-tile image such as `tests/parity/bigtiles` is this case),
 /// never more than `max_threads` (the lane threads are counted), and the bytes are the serial ones.

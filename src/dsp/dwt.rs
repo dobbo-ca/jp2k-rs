@@ -159,7 +159,8 @@ const COL_BLOCK: usize = 16;
 const COL_BLOCK_97: usize = 64;
 
 /// A vertical pass over `bn` columns: `(p, stride, bn, blk, n, cas, hi)` with `p` starting at the
-/// first column and `blk` `n * bn` samples of scratch.
+/// first column and `blk` `n * bn` samples of scratch, or, with `hi` false, at least `5 * bn` for
+/// a wide sweep (`inverse_dwt`'s `low`; `cols_97` then sweeps).
 type ColPass<'a, T> = &'a (dyn Fn(&mut [T], usize, usize, &mut [T], usize, usize, bool) + Sync);
 
 /// `inverse_dwt`'s in-place vertical pass of a level without high bands, over one thread's row
@@ -515,10 +516,10 @@ fn cols_97(
     }
 }
 
-/// The 5/3 vertical pass over `bn` columns of `p` at once, as `cols_97`: the Mallat rows go to
-/// the block `b` in the same order, each step of `row_53` is a kernel call over a whole row of
-/// it (the neighbour rows clamped on the band indices, as `inverse_1d_53` does), and row `i` of
-/// the block goes back to its interleaved row of `p`.
+/// The 5/3 vertical pass over `bn` columns of `p` at once: the Mallat rows go to the block `b`,
+/// each step of `row_53` is a kernel call over a whole row of it (the neighbour rows clamped on
+/// the band indices, as `inverse_1d_53` does), and row `i` of the block goes back to its
+/// interleaved row of `p`.
 fn cols_53(p: &mut [i32], stride: usize, bn: usize, b: &mut [i32], n: usize, cas: usize) {
     if n < 2 {
         if cas == 1 && n == 1 {
@@ -643,7 +644,8 @@ impl Sample for f32 {
 
 /// The vertical pass over the `bw` columns of `p` starting at column `x0`, `p` having row pitch
 /// `stride`: with `cols`, that closure; else each column is gathered as a line and given to
-/// `kernel`. `blk` holds `bw * rh` samples of scratch, `out` a line.
+/// `kernel`. `blk` holds at least `bw * rh` samples of scratch, or, for a wide sweep, at least
+/// `5 * bw` (`cols` gets at most `bw * rh` of them); `out` holds a line.
 fn col_pass<T: Copy>(
     p: &mut [T],
     stride: usize,
@@ -696,7 +698,8 @@ fn col_pass<T: Copy>(
 /// of the high band is zero. `None`: every level may have high-band data.
 ///
 /// With `nw` above 1 and a level of at least two `SAMPLES_PER_THREAD`, the rows go to up to `nw`
-/// threads in chunks of `ROW_CHUNK` and the columns in one run of blocks per thread; every
+/// threads in chunks of `ROW_CHUNK` and the columns in one run of blocks per thread (one wide
+/// run for a sweep, below); every
 /// sample is lifted by the same operations in the same order, so the result does not depend on
 /// `nw`. Each thread's scratch is charged to `budget`; when it does not fit for every thread the
 /// pass uses the threads it does.
@@ -706,7 +709,10 @@ fn col_pass<T: Copy>(
 /// then goes over one wide run of columns a thread, as Go's `inverseDWT` does, not `col_block`
 /// columns at a time: the one-thread pass gives `cols` the whole width, the threaded one gives
 /// each thread's row pieces to `low` in place. Each row is then read in one contiguous run, not
-/// in pieces a plane row apart, and the threaded pass copies nothing.
+/// in pieces a plane row apart, and the threaded pass copies nothing. This needs 5 rows of the
+/// run's width to fit the block scratch (`5 * width <= col_block * max_h`); a short, wide level
+/// that does not fit goes in `col_block` blocks as usual, and a level under 5 rows high takes
+/// `cols_97`'s gather path over the whole width. One `check_cancel` covers each run.
 fn inverse_dwt<T: Copy + Default + Send + Sample>(
     p: &mut [T],
     stride: usize,
@@ -854,8 +860,8 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                 }
             }
             check_cancel(cancel)?;
-            // The threaded vertical pass hands each thread one run of column blocks, as row
-            // pieces; the pieces cost 16 bytes a row.
+            // The threaded vertical pass hands each thread one run of columns, as row pieces
+            // (column blocks, or one wide run for a `low` sweep); the pieces cost 16 bytes a row.
             let nbk = rw.div_ceil(col_block);
             let g = lvl_nw.min(nbk);
             let piece = std::mem::size_of::<&mut [T]>();
@@ -935,7 +941,9 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                 continue;
             }
             let s = &mut lines[0];
-            let block = if low.is_some() && !hi && rh > 1 && rw.saturating_mul(5) <= s.blk.len() {
+            // `blk_len`, not this line's own length (a kept one can be longer), so the choice
+            // does not depend on earlier calls.
+            let block = if low.is_some() && !hi && rh > 1 && rw.saturating_mul(5) <= blk_len {
                 rw
             } else {
                 col_block
