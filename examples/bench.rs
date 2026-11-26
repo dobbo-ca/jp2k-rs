@@ -55,6 +55,8 @@ fn main() -> io::Result<()> {
         ..Options::default()
     };
     let cancel = AtomicBool::new(false);
+    // BENCH_OP=dec or c0 times that op only (profile.yml); unset, both.
+    let op = env::var("BENCH_OP").unwrap_or_default();
     let mut names: Vec<String> = Vec::new();
     for entry in fs::read_dir(dir)? {
         let name = entry?.file_name().to_string_lossy().into_owned();
@@ -71,9 +73,14 @@ fn main() -> io::Result<()> {
         };
         let b = img.bounds;
         let pixels = (b.x1 - b.x0) * (b.y1 - b.y0);
-        if let Some(ns) = time1(n, || jp2k::decode(&data, &opts, &cancel).is_ok()) {
+        if op == "c0" {
+            files += 1;
+        } else if let Some(ns) = time1(n, || jp2k::decode(&data, &opts, &cancel).is_ok()) {
             println!("{name}:dec\t{pixels}\t{ns}");
             files += 1;
+        }
+        if op == "dec" {
+            continue;
         }
         if let Some(ns) = time1(n, || {
             jp2k::decode_components(&data, &[0], &opts, &cancel).is_ok()

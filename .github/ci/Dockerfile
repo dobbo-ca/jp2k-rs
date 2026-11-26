@@ -181,6 +181,13 @@ COPY . .
 RUN --mount=type=cache,id=jp2k-target,target=/src/target \
     find src examples tests -name "*.rs" -exec touch {} + && CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --locked --release --example bench && cp target/release/examples/bench /usr/local/bin/bench-dbg
 
+# perf (profile.yml, job perf): the bench example with line tables and the Go oracle in /out, which
+# the job copies out and runs under perf on the runner (tests/parity/perf.sh).
+FROM src AS perf
+COPY --from=go-oracle /out/oracle /out/oracle
+RUN --mount=type=cache,id=jp2k-target,target=/src/target \
+    find src examples tests -name "*.rs" -exec touch {} + && CARGO_PROFILE_RELEASE_DEBUG=1 cargo build --locked --release --example bench && cp target/release/examples/bench /out/bench-dbg
+
 # PGO and BOLT (pgo.yml, dispatch only; docs/performance.md): cargo-pgo builds the bench example
 # instrumented, trains it on the fixtures, rebuilds it with the profile, and, when BOLT is
 # installed, once more through BOLT. The tools are installed before `COPY . .`, so a new commit

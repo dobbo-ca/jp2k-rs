@@ -421,9 +421,16 @@ func benchDir(dir string, n int) error {
 		if err != nil {
 			continue
 		}
-		if ns, ok := time1(func() error { _, err := jp2k.Decode(bytes.NewReader(data)); return err }); ok {
-			r := img.Bounds()
-			fmt.Printf("%s:dec\t%d\t%d\n", name, r.Dx()*r.Dy(), ns)
+		// BENCH_OP=dec or c0 times that op only (profile.yml); unset, both.
+		op := os.Getenv("BENCH_OP")
+		if op != "c0" {
+			if ns, ok := time1(func() error { _, err := jp2k.Decode(bytes.NewReader(data)); return err }); ok {
+				r := img.Bounds()
+				fmt.Printf("%s:dec\t%d\t%d\n", name, r.Dx()*r.Dy(), ns)
+			}
+		}
+		if op == "dec" {
+			continue
 		}
 		if ns, ok := time1(func() error { _, err := jp2k.DecodeComponents(ctx, bytes.NewReader(data), []int{0}); return err }); ok {
 			r := img.Bounds()
