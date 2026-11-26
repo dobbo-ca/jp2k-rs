@@ -19,6 +19,12 @@ its own cargo cache mount). They are not gated: the 1.10 gate is for the default
 build is held to the same output bytes. The build profile and the flags:
 [performance.md](performance.md).
 
+`ab.yml` (dispatch only, not gated) builds the bench example twice, from a base ref (A, default
+`main`) and from the dispatched ref (B), and times the two alternately on one runner
+(`tests/parity/ab.sh`): ms per megapixel per class, at one thread and at default threads, and
+B / A. A hosted runner's CPU model changes from run to run and moves the Rust / Go ratio with it,
+so the before and after numbers of a change come from the same job.
+
 ## Hosted runner baseline
 
 Bench run 45726753219 (2026-11-25) on a GitHub-hosted `ubuntu-24.04` runner, 2 CPUs, AVX-512
