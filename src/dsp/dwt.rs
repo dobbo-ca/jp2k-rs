@@ -162,6 +162,10 @@ const COL_BLOCK_97: usize = 64;
 /// first column and `blk` `n * bn` samples of scratch.
 type ColPass<'a, T> = &'a (dyn Fn(&mut [T], usize, usize, &mut [T], usize, usize, bool) + Sync);
 
+/// `inverse_dwt`'s in-place vertical pass of a level without high bands, over one thread's row
+/// pieces: `(rows, n, cas, scratch)`, `scratch` 5 rows of the pieces' width.
+type LowPass<'a, T> = &'a (dyn Fn(&mut [&mut [T]], usize, usize, &mut [T]) + Sync);
+
 /// `d[i] = step(d[i], u[clamp(i + o)], u[clamp(i + o + 1)])` for `o` in {-1, 0}: one lifting
 /// step on a band `d` of a line held split into its low and high bands (Mallat order), `u` being
 /// the other band. The mirror extension of F.3.7 becomes a clamp in split form. The edges are
@@ -292,15 +296,101 @@ fn lift_row<T>(
     kernel(d, pick(ju), pick(jv));
 }
 
+/// The rows `sweep_low` lifts in place, `w` samples each: rows of a plane `stride` apart
+/// (`Strided`), or one thread's pieces of a plane's rows (a slice of row slices).
+trait Rows {
+    fn row(&self, i: usize) -> &[f32];
+    fn row_mut(&mut self, i: usize) -> &mut [f32];
+    /// Row `d` to write, and rows `u` and `v` (neither is `d`) to read.
+    fn three(&mut self, d: usize, u: usize, v: usize) -> (&mut [f32], &[f32], &[f32]);
+}
+
+/// Rows `stride` apart in `p`, `w` wide.
+struct Strided<'a> {
+    p: &'a mut [f32],
+    stride: usize,
+    w: usize,
+}
+
+impl Rows for Strided<'_> {
+    fn row(&self, i: usize) -> &[f32] {
+        &self.p[i * self.stride..i * self.stride + self.w]
+    }
+
+    fn row_mut(&mut self, i: usize) -> &mut [f32] {
+        &mut self.p[i * self.stride..i * self.stride + self.w]
+    }
+
+    fn three(&mut self, d: usize, u: usize, v: usize) -> (&mut [f32], &[f32], &[f32]) {
+        let (s, w) = (self.stride, self.w);
+        let (head, tail) = self.p.split_at_mut(d * s);
+        let (dst, rest) = tail.split_at_mut(w);
+        // Rows above `d` are in `head`, rows below in `rest` (which starts at `d*s + w`).
+        fn pick<'a>(
+            head: &'a [f32],
+            rest: &'a [f32],
+            d: usize,
+            q: usize,
+            s: usize,
+            w: usize,
+        ) -> &'a [f32] {
+            if q < d {
+                &head[q * s..q * s + w]
+            } else {
+                &rest[(q - d) * s - w..(q - d) * s]
+            }
+        }
+        let (head, rest): (&[f32], &[f32]) = (head, rest);
+        (
+            dst,
+            pick(head, rest, d, u, s, w),
+            pick(head, rest, d, v, s, w),
+        )
+    }
+}
+
+impl Rows for [&mut [f32]] {
+    fn row(&self, i: usize) -> &[f32] {
+        &self[i][..]
+    }
+
+    fn row_mut(&mut self, i: usize) -> &mut [f32] {
+        &mut self[i][..]
+    }
+
+    fn three(&mut self, d: usize, u: usize, v: usize) -> (&mut [f32], &[f32], &[f32]) {
+        let (before, rest) = self.split_at_mut(d);
+        let (dst, after) = rest.split_at_mut(1);
+        fn pick<'a>(
+            before: &'a [&mut [f32]],
+            after: &'a [&mut [f32]],
+            d: usize,
+            q: usize,
+        ) -> &'a [f32] {
+            if q < d {
+                &before[q][..]
+            } else {
+                &after[q - d - 1][..]
+            }
+        }
+        let (before, after): (&[&mut [f32]], &[&mut [f32]]) = (before, after);
+        (
+            &mut dst[0][..],
+            pick(before, after, d, u),
+            pick(before, after, d, v),
+        )
+    }
+}
+
 /// `cols_97` for a level whose high bands are zero, in place over `w` columns of `p` with no
 /// gather or scatter (Go's `sweep97Low`). The high rows of `p` are zero and never read, so
 /// walking output row `y` downward only touches low rows already consumed: each step is a
 /// `w`-wide scale or lift over five hot rows of `s` (`5 * w` samples: two scaled low rows, two
 /// gamma rows, one zero row) or the rows of `p`, and every sample gets the same operations in the
-/// same order as in `cols_97`.
-fn sweep_low(
-    p: &mut [f32],
-    stride: usize,
+/// same order as in `cols_97`. `p` is the plane's rows (`Strided`) or one thread's pieces of
+/// them, each `w` wide.
+fn sweep_low<R: Rows + ?Sized>(
+    p: &mut R,
     w: usize,
     n: usize,
     cas: usize,
@@ -318,11 +408,7 @@ fn sweep_low(
         if (0..ni).contains(&t) {
             let q = ((t - ci) / 2) as usize;
             let k = a_slot(t);
-            simd::scale_to(
-                &mut s[k * w..(k + 1) * w],
-                &p[q * stride..q * stride + w],
-                DWT97_K,
-            );
+            simd::scale_to(&mut s[k * w..(k + 1) * w], p.row(q), DWT97_K);
         }
         let y = t + 1;
         if (0..ni).contains(&y) {
@@ -345,31 +431,13 @@ fn sweep_low(
             let yu = y as usize;
             let (a, g0, g1) = (a_slot(y), g_slot(y - 1), g_slot(y + 1));
             let row = |k: usize| &s[k * w..(k + 1) * w];
-            simd::lift_to(
-                &mut p[yu * stride..yu * stride + w],
-                row(a),
-                row(g0),
-                row(g1),
-                -DWT97_BETA,
-                r,
-            );
+            simd::lift_to(p.row_mut(yu), row(a), row(g0), row(g1), -DWT97_BETA, r);
         }
         let y = t + 3;
         if (0..ni).contains(&y) {
             let yu = y as usize;
             let g = g_slot(y);
-            let (head, tail) = p.split_at_mut(yu * stride);
-            let (dst, rest) = tail.split_at_mut(w);
-            let (head, rest): (&[f32], &[f32]) = (head, rest);
-            // Rows above `y` are in `head`, rows below in `rest` (which starts at `y*stride + w`).
-            let pick = |q: usize| {
-                if q < yu {
-                    &head[q * stride..q * stride + w]
-                } else {
-                    &rest[(q - yu) * stride - w..(q - yu) * stride]
-                }
-            };
-            let (u, v) = (pick(mirror(y - 1, n)), pick(mirror(y + 1, n)));
+            let (dst, u, v) = p.three(yu, mirror(y - 1, n), mirror(y + 1, n));
             simd::lift_to(dst, &s[g * w..(g + 1) * w], u, v, -DWT97_ALPHA, r);
         }
         t -= 2;
@@ -394,7 +462,14 @@ fn cols_97(
     }
     // `hi` false: the whole high band is zero, which a sweep over rows exploits.
     if !hi && b.len() >= 5 * bn {
-        sweep_low(p, stride, bn, n, cas, &mut b[..5 * bn], r);
+        sweep_low(
+            &mut Strided { p, stride, w: bn },
+            bn,
+            n,
+            cas,
+            &mut b[..5 * bn],
+            r,
+        );
         return;
     }
     let (sn, _) = sn_dn(n, cas);
@@ -579,7 +654,7 @@ fn col_pass<T: Copy>(
     cols: Option<ColPass<'_, T>>,
 ) {
     if let Some(cols) = cols {
-        // A wide sweep (`inverse_dwt`'s `wide_low`) needs only 5 rows of `bw`.
+        // A wide sweep (`inverse_dwt`'s `low`) needs only 5 rows of `bw`.
         let n = (bw * rh).min(blk.len());
         cols(&mut p[x0..], stride, bw, &mut blk[..n], rh, cas_y, hi);
         return;
@@ -623,10 +698,12 @@ fn col_pass<T: Copy>(
 /// `nw`. Each thread's scratch is charged to `budget`; when it does not fit for every thread the
 /// pass uses the threads it does.
 ///
-/// `wide_low`: `cols` sweeps a level without high bands in place in 5 rows of scratch
-/// (`cols_97`'s `sweep_low`). The one-thread vertical pass then gives it the level's whole width
-/// at once, as Go's `inverseDWT` does, not `col_block` columns: each row is read in one
-/// contiguous run, not in pieces a plane row apart.
+/// `low`, when given, sweeps a level without high bands in place in 5 rows of scratch
+/// (`sweep_low`), and `cols` does the same for such a level. The vertical pass of such a level
+/// then goes over one wide run of columns a thread, as Go's `inverseDWT` does, not `col_block`
+/// columns at a time: the one-thread pass gives `cols` the whole width, the threaded one gives
+/// each thread's row pieces to `low` in place. Each row is then read in one contiguous run, not
+/// in pieces a plane row apart, and the threaded pass copies nothing.
 fn inverse_dwt<T: Copy + Default + Send + Sample>(
     p: &mut [T],
     stride: usize,
@@ -638,7 +715,7 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
     kernel: impl Fn(&mut [T], usize, usize, &mut [T], bool) + Sync,
     col_block: usize,
     cols: Option<ColPass<'_, T>>,
-    wide_low: bool,
+    low: Option<LowPass<'_, T>>,
 ) -> Result<()> {
     if rects.len() < 2 {
         return Ok(());
@@ -785,7 +862,15 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                 0
             };
             if cost > 0 && budget.charge(cost).is_ok() {
-                let width = nbk.div_ceil(g) * col_block;
+                // A level without high bands: one wide run of columns a thread, swept in place
+                // by `low` (Go's `inverseDWT`), with no copy to `pblk` and back.
+                let wide = (rw.div_ceil(g) + 15) & !15;
+                let sweep = low.filter(|_| !hi && rh > 1 && wide.saturating_mul(5) <= blk_len);
+                let width = if sweep.is_some() {
+                    wide
+                } else {
+                    nbk.div_ceil(g) * col_block
+                };
                 let mut groups: Vec<Vec<&mut [T]>> = Vec::new();
                 let mut x = 0;
                 while x < rw {
@@ -810,6 +895,11 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                     groups.into_iter(),
                     |s, _, mut rows: Vec<&mut [T]>| {
                         let gw = rows.first().map_or(0, |r| r.len());
+                        if let Some(low) = sweep {
+                            check_cancel(cancel)?;
+                            low(&mut rows[..], rh, cas_y, &mut s.blk[..5 * gw]);
+                            return Ok(());
+                        }
                         let mut k0 = 0;
                         while k0 < gw {
                             check_cancel(cancel)?;
@@ -842,7 +932,7 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                 continue;
             }
             let s = &mut lines[0];
-            let block = if wide_low && !hi && rh > 1 && rw.saturating_mul(5) <= s.blk.len() {
+            let block = if low.is_some() && !hi && rh > 1 && rw.saturating_mul(5) <= s.blk.len() {
                 rw
             } else {
                 col_block
@@ -899,7 +989,7 @@ pub fn inverse_dwt_53(
         |mal, sn, cas, out, _| row_53(mal, sn, cas, out),
         COL_BLOCK_97,
         Some(&cols),
-        false,
+        None,
     )
 }
 
@@ -929,11 +1019,15 @@ pub fn inverse_dwt_97(
             },
             COL_BLOCK,
             None,
-            false,
+            None,
         );
     }
     let cols = |p: &mut [f32], stride, bn, b: &mut [f32], n, cas, hi| {
         cols_97(p, stride, bn, b, n, cas, r, hi)
+    };
+    let low = |rows: &mut [&mut [f32]], n: usize, cas: usize, s: &mut [f32]| {
+        let w = rows.first().map_or(0, |r| r.len());
+        sweep_low(rows, w, n, cas, s, r);
     };
     inverse_dwt(
         p,
@@ -946,7 +1040,7 @@ pub fn inverse_dwt_97(
         |mal, sn, cas, out, hi| row_97(mal, sn, cas, out, r, hi),
         COL_BLOCK_97,
         Some(&cols),
-        true,
+        Some(&low),
     )
 }
 
@@ -1259,7 +1353,7 @@ mod tests {
                             },
                             COL_BLOCK,
                             None,
-                            false,
+                            None,
                         )
                         .unwrap();
                         let mut got = data;
@@ -1319,7 +1413,7 @@ mod tests {
                     },
                     COL_BLOCK,
                     None,
-                    false,
+                    None,
                 )
                 .unwrap();
                 let mut got = data;
@@ -1428,7 +1522,13 @@ mod tests {
                 let (tw, th) = ((top.x1 - top.x0) as usize, (top.y1 - top.y0) as usize);
                 let ints: Vec<i32> = (0..tw * th).map(|_| (next() >> 50) as i32 - 8192).collect();
                 let floats: Vec<f32> = ints.iter().map(|&v| v as f32 / 4.0).collect();
-                for high in [None, Some([true, false, true, true])] {
+                // The zero-high top levels are large enough to thread: the threaded sweep.
+                for high in [
+                    None,
+                    Some([true, false, true, true]),
+                    Some([true, true, true, false]),
+                    Some([true, false, false, false]),
+                ] {
                     let hi = high.as_ref().map(|h| &h[..]);
                     let mut b = Budget::new(&Limits::default());
                     let mut want = ints.clone();
