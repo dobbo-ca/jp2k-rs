@@ -5,7 +5,8 @@
 //!
 //! Lengths: 16, 32 and 64 (column blocks, code-block rows, small levels), 512 and 1020 (row bands)
 //! and 1024 and 2040 (tile rows: the ICT, the RCT and the output packs). `lift` and `lift_to` also
-//! run as `cols_97` calls them, over the 64-float rows of a 64x1024 block (256 KB, out of L1), and
+//! run over the 64-float rows of a 64x1024 block (256 KB, out of L1), as `cols_97`'s block steps
+//! (its last two steps write the plane's rows, a stride apart, not a block), and
 //! `lift53_sub` as `cols_53` does: that row is "64x1024", its time per row.
 
 use jp2k::fuzz::{Rounding, simd as k};

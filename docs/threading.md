@@ -30,8 +30,8 @@ How `Limits::max_threads` and the worker pool work. The other limits are in [lim
     and never more. It keeps no other state. `max_threads: 1` never touches it (it is not even
     created) and starts nothing.
   - Each call takes at most `max_threads` threads from the pool, counting the caller, and at most
-    the pool's size (the caller and `size - 1` workers), as Go uses `GOMAXPROCS`. So with the
-    default `max_threads` on the shared pool, a call uses `available_parallelism` threads.
+    the pool's size (the caller included), as Go uses `GOMAXPROCS`. So with the default
+    `max_threads` on the shared pool, a call uses up to `available_parallelism` threads.
     (Before, a pool of more than 2 threads gave one fewer than its size; on a 4-CPU hosted runner
     that was 11 to 15% slower at default threads on every bench class, `ab.yml`.)
   - If the shared pool cannot be created, the call starts one set of workers of its own at
