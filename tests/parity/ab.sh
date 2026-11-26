@@ -2,7 +2,7 @@
 # A/B of two builds of the Rust bench example on one runner, as a markdown table per thread
 # setting: tests/parity/ab.sh <bench A> <bench B> [N]; run from the repo root. The runner type
 # moves the Rust / Go ratio between bench runs (docs/benchmarks.md), so a change is measured
-# against its base in the same job. A and B alternate, five runs each, and the best of the five
+# against its base in the same job. A and B alternate, six runs each, each first in half of the pairs, and the best of the six
 # counts per file. Not gated. ab.yml builds A from a base ref and B from the head.
 set -eu
 export LC_ALL=C
@@ -16,9 +16,15 @@ best() {
   awk -F'\t' '!($1 in m) || $3 < m[$1] { m[$1] = $3; b[$1] = $2 } END { for (k in m) printf "%s\t%s\t%s\n", k, b[k], m[k] }' "$@" | sort
 }
 for t in 1 0; do
-  for i in 1 2 3 4 5; do
-    "$a" "$d" "$n" $t >"$o/a$i.tsv" 2>/dev/null
-    "$b" "$d" "$n" $t >"$o/b$i.tsv" 2>/dev/null
+  # A then B, then B then A: the second of a pair ran 1 to 3% faster on unchanged code.
+  for i in 1 2 3 4 5 6; do
+    if [ $((i % 2)) = 1 ]; then
+      "$a" "$d" "$n" $t >"$o/a$i.tsv" 2>/dev/null
+      "$b" "$d" "$n" $t >"$o/b$i.tsv" 2>/dev/null
+    else
+      "$b" "$d" "$n" $t >"$o/b$i.tsv" 2>/dev/null
+      "$a" "$d" "$n" $t >"$o/a$i.tsv" 2>/dev/null
+    fi
   done
   best "$o"/a?.tsv >"$o/a.tsv"
   best "$o"/b?.tsv >"$o/b.tsv"
