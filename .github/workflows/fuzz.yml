@@ -10,6 +10,9 @@ on:
         description: Run only fuzz-arm64 (skip the x86_64 matrix)
         type: boolean
         default: false
+      targets:
+        description: The x86_64 targets, a JSON list (empty for all), e.g. ["decode","tier1"]
+        default: ''
 permissions:
   contents: read
 # A new run waits for the one before it; it does not cancel it.
@@ -24,7 +27,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        target: [decode, decode_limits, reader, region, components, codestream, markers, tier2, tier1, mq, threads, simd_kernels]
+        target: ${{ fromJSON(inputs.targets || '["decode", "decode_limits", "reader", "region", "components", "codestream", "markers", "tier2", "tier1", "mq", "threads", "simd_kernels"]') }}
         # `scalar` (JP2K_SIMD=scalar) runs the decoders on the scalar kernels, which the SIMD tier
         # hides on an AVX-512 runner. The parsers, tier-1 and tier-2 do not use the kernels, and
         # simd_kernels runs every tier itself.
