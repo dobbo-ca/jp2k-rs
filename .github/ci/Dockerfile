@@ -32,8 +32,10 @@ RUN --mount=type=cache,id=jp2k-target,target=/src/target \
 # The fuzz targets must keep compiling (stable is enough to check them; fuzz.yml runs them).
 RUN --mount=type=cache,id=jp2k-fuzz-target,target=/src/tests/fuzz/target \
     find src examples tests -name "*.rs" -exec touch {} + && cargo clippy --locked --manifest-path tests/fuzz/Cargo.toml --all-targets -- -D warnings
+# The second run prints the tier the tests used ("SIMD tier: ..."), so the log shows what was tested.
 RUN --mount=type=cache,id=jp2k-target,target=/src/target \
-    find src examples tests -name "*.rs" -exec touch {} + && JP2K_EXPECT_AVX512=$(grep -qw avx512f /proc/cpuinfo && echo 1 || echo 0) cargo test --locked --no-fail-fast
+    find src examples tests -name "*.rs" -exec touch {} + && JP2K_EXPECT_AVX512=$(grep -qw avx512f /proc/cpuinfo && echo 1 || echo 0) cargo test --locked --no-fail-fast \
+    && cargo test --locked --lib -- --nocapture tier_is_detected avx512_where_expected
 RUN --mount=type=cache,id=jp2k-target,target=/src/target \
     find src examples tests -name "*.rs" -exec touch {} + && JP2K_EXPECT_AVX512=$(grep -qw avx512f /proc/cpuinfo && echo 1 || echo 0) JP2K_SIMD=scalar cargo test --locked --no-fail-fast
 # The x86-64-v4 build (docs/performance.md, the bench's v4 column) must give the same bytes as the
@@ -60,7 +62,8 @@ RUN --mount=type=cache,id=jp2k-target,target=/src/target \
 # parity-arm64 stage.
 FROM src AS arm64
 RUN --mount=type=cache,id=jp2k-target,target=/src/target \
-    find src examples tests -name "*.rs" -exec touch {} + && cargo test --locked --no-fail-fast --lib --test rounding
+    find src examples tests -name "*.rs" -exec touch {} + && cargo test --locked --no-fail-fast --lib --test rounding \
+    && cargo test --locked --lib -- --nocapture tier_is_detected
 RUN --mount=type=cache,id=jp2k-target,target=/src/target \
     find src examples tests -name "*.rs" -exec touch {} + && JP2K_SIMD=scalar cargo test --locked --no-fail-fast --lib --test rounding
 

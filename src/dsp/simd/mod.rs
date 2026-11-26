@@ -2,7 +2,8 @@
 //! dequantization of a row and the output packs. `scalar` is the reference; AVX2+FMA and AVX-512
 //! (x86_64) and NEON (aarch64) sit beside it and are bit-exact with it: the same IEEE operations in
 //! the same order per lane, a fused multiply-add only where `Rounding::Fused` has one. The tier is
-//! picked once; `JP2K_SIMD=scalar` forces the scalar one, `JP2K_SIMD=avx2` caps it at AVX2.
+//! picked once; `JP2K_SIMD=scalar` forces the scalar one, `JP2K_SIMD=avx2` caps it at AVX2, and
+//! `JP2K_SIMD=avx512` requires AVX-512 and panics where it is missing.
 //! The i32 kernels of the 5/3 path (the inverse RCT, the two lifting steps and the reversible
 //! dequantization of a row) wrap as `wrapping_*` does; they have AVX2 versions (and AVX-512 for
 //! the dequantization) and run scalar on aarch64.
@@ -59,13 +60,21 @@ pub(crate) fn available() -> &'static [Tier] {
 }
 
 /// The tier the kernels run: the best available; scalar under `JP2K_SIMD=scalar`, and the best
-/// below AVX-512 under `JP2K_SIMD=avx2`. Resolved once.
+/// below AVX-512 under `JP2K_SIMD=avx2`. `JP2K_SIMD=avx512` requires the AVX-512 kernels (for CI
+/// under an emulator): it panics on a CPU or target without them, so a test run cannot fall back
+/// to AVX2 without a word. Resolved once.
 pub(crate) fn tier() -> Tier {
     static TIER: OnceLock<Tier> = OnceLock::new();
     *TIER.get_or_init(|| {
         let env = std::env::var_os("JP2K_SIMD");
         if env.as_ref().is_some_and(|v| v == "scalar") {
             return Tier::Scalar;
+        }
+        if env.as_ref().is_some_and(|v| v == "avx512") {
+            assert!(
+                avx512_kernels(),
+                "JP2K_SIMD=avx512, but this CPU lacks AVX2, FMA, AVX-512 F and BW"
+            );
         }
         let all = available();
         #[cfg(target_arch = "x86_64")]
@@ -75,6 +84,18 @@ pub(crate) fn tier() -> Tier {
         }
         all.last().copied().unwrap_or(Tier::Scalar)
     })
+}
+
+/// Whether the AVX-512 kernels run here: false on a target without them.
+fn avx512_kernels() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        available().contains(&Tier::Avx512(Proof(())))
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 /// `d[i] = c * (u[i] + v[i]) + d[i]`, rounded as `r` says (`Fused`: once). `u` and `v` are at
@@ -703,8 +724,16 @@ mod tests {
         v.iter().map(|x| x.to_bits()).collect()
     }
 
+    /// Also logs the tier in use (`--nocapture`), so a CI log shows what the run tested.
     #[test]
     fn tier_is_detected() {
+        let in_use = available().iter().position(|t| *t == tier()).unwrap_or(0);
+        let name = fuzz::tiers()[in_use];
+        eprintln!("SIMD tier: {name}, AVX-512 kernels: {}", avx512_kernels());
+        if std::env::var_os("JP2K_SIMD").is_some_and(|v| v == "avx512") {
+            assert!(avx512_kernels(), "JP2K_SIMD=avx512, but no AVX-512 kernels");
+            assert_eq!(name, "avx512");
+        }
         #[cfg(target_arch = "x86_64")]
         assert!(
             available().contains(&Tier::Avx2(Proof(()))),
@@ -737,8 +766,10 @@ mod tests {
             "AVX-512 F and BW detected: {have}; tiers {:?}",
             fuzz::tiers()
         );
-        if std::env::var("JP2K_EXPECT_AVX512").as_deref() == Ok("1") {
-            assert!(have, "JP2K_EXPECT_AVX512=1, but this CPU has no AVX-512");
+        if std::env::var("JP2K_EXPECT_AVX512").as_deref() == Ok("1")
+            || std::env::var("JP2K_SIMD").as_deref() == Ok("avx512")
+        {
+            assert!(have, "AVX-512 required, but this CPU has no AVX-512");
         }
     }
 

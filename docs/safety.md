@@ -7,7 +7,7 @@
 The f32 kernels of the 9/7 path have AVX2+FMA and AVX-512 (x86_64) and NEON (aarch64) tiers beside
 the scalar reference, picked once at first use by runtime detection (the AVX-512 tier needs avx2,
 fma, avx512f and avx512bw); `JP2K_SIMD=scalar` forces scalar, and `JP2K_SIMD=avx2` caps the tier at
-AVX2 (on aarch64 it changes nothing). They are
+AVX2 (on aarch64 it changes nothing); `JP2K_SIMD=avx512` panics on a CPU without AVX-512 (for CI under an emulator). They are
 bit-exact with scalar (`Rounding::Fused` uses a fused multiply-add, the others a separate multiply
 and add), so output never depends on the tier. Eight kernels: one lifting step (`d += c*(u+v)`), the
 band scale, `lift_to` and `scale_to` (the lift and the scale writing to a separate output), the inverse ICT, the
@@ -27,6 +27,9 @@ and the JJ2000 rounding stays scalar. `cargo test` checks every available tier a
 lengths, and asserts AVX2 (x86_64) or NEON (aarch64) was detected; with `JP2K_EXPECT_AVX512=1`
 (set by CI only when the host CPU has AVX-512) it also asserts AVX-512. CI runs the tests both ways,
 lints the aarch64 target, and runs the unit tests and `tests/rounding.rs` on a native arm64 runner, with the NEON tier and with `JP2K_SIMD=scalar` (job `arm64`; the full suite runs on x86_64 in `test`).
+SIMD tiers in CI: scalar, AVX2 (x86_64) and NEON (aarch64) natively; the AVX-512 kernels under Intel SDE
+(job `avx512-sde`: the unit tests on `-spr` with `JP2K_SIMD=avx512`, which fails on a CPU without AVX-512),
+and natively when the hosted runner has AVX-512.
 
 ### Tiers and `unsafe`
 
