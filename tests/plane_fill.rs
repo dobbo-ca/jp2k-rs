@@ -8,7 +8,7 @@
 mod common;
 
 use common::*;
-use jp2k::{Decoder, Options, Plane, Raster, Result};
+use jp2k::{Decoder, Error, Options, Plane, Raster};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 struct Rng(u64);
@@ -30,7 +30,7 @@ impl Rng {
 /// too big to keep): the error, or the layout and every byte.
 type Out = (u64, u64);
 
-fn raster(r: Result<&Raster>) -> u64 {
+fn raster(r: Result<&Raster, &Error>) -> u64 {
     let mut h = DefaultHasher::new();
     match r {
         Ok(r) => (
@@ -43,7 +43,7 @@ fn raster(r: Result<&Raster>) -> u64 {
     h.finish()
 }
 
-fn planes(p: Result<&[Plane]>) -> u64 {
+fn planes(p: Result<&[Plane], &Error>) -> u64 {
     let mut h = DefaultHasher::new();
     match p {
         Ok(ps) => {
@@ -57,15 +57,15 @@ fn planes(p: Result<&[Plane]>) -> u64 {
 }
 
 fn run(data: &[u8], o: &Options) -> Out {
-    (
-        raster(jp2k::decode(data, o, &nc()).as_ref()),
-        planes(jp2k::decode_components(data, &[0], o, &nc()).as_deref()),
-    )
+    let r = jp2k::decode(data, o, &nc());
+    let p = jp2k::decode_components(data, &[0], o, &nc());
+    (raster(r.as_ref()), planes(p.as_deref()))
 }
 
 fn run_reused(d: &mut Decoder, data: &[u8], o: &Options) -> Out {
-    let r = raster(d.decode(data, o, &nc()));
-    (r, planes(d.decode_components(data, &[0], o, &nc())))
+    let r = raster(d.decode(data, o, &nc()).as_ref().copied());
+    let p = d.decode_components(data, &[0], o, &nc());
+    (r, planes(p.as_ref().copied()))
 }
 
 #[test]
