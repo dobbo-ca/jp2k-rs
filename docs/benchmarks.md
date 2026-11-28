@@ -90,6 +90,65 @@ transparent huge pages for B (`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, `ab.yml` 
 not in the gate) changed one thread by 0.99 to 1.02 and default threads by 0.94 to 1.01, so the
 faults cost little at one thread. A reused `Decoder` keeps its buffers between calls.
 
+## Partial plane zeroing and the copies (tried, none kept)
+
+The perf job of `profile.yml` (single thread, bigtiles):
+
+- Run 46097722003 (`main` 6ad4c43, before #14), AMD EPYC 9V74: `c0` Go 346.3 ms, Rust 359.2 ms
+  a call (1.04). System time over the profile: Rust 0.43 s, Go 0.22 s. Per symbol, Rust against
+  Go in ms of a `c0` call: tier-1 cleanup and significance passes 199 against 188, magnitude
+  refinement 19 against 26, the inverse DWT's lifting, scaling and interleaving about 64 against
+  52, the kernel's page-fault symbols about 23 against 9, Go's output conversion (`SamplesF`,
+  `packF16SSE2`) 25 against Rust's `pack_u16` 5. libc's `memset` and `memmove` have no names
+  in this run.
+- Run 46105217750 (#14, which names libc's symbols and prints their callers and the page-fault
+  stacks of each op), AMD EPYC 7763, `c0` Go 439.6 ms, Rust 449.2 ms (1.02), share of all
+  samples: `memmove` 2.49% (2.20% the copy of each row into the scratch line before the 9/7 row
+  kernel, 0.25% the copy of each code-block into the plane), `memset` 2.06% (1.81%
+  `PlanePool::take_f`, the full zeroing of a spare tile-component plane; 0.07% `take_done`'s
+  `reuse`). Of its 245760 page faults, 73% are the `u16` output of `c0` (64 MB, faulted in on
+  each call), 13% the one `decode` the bench example makes before it times `c0`, and 13% the
+  `memset` of the call's first new plane. `dec`: `memset` 1.87% (1.55% `take_f`), `memmove`
+  1.84% (1.46% the row copy, 0.38% the block copy), and 92% of the page faults in the RGBA
+  output.
+
+Each change, A against B on one runner (`ab.yml`), Rust ms/Mpixel B / A for bigtiles:
+
+| change | B | `ab.yml` run | CPU | 1 thread `dec` / `c0` | default `dec` / `c0` | kept |
+|---|---|---|---|---|---|---|
+| zero a spare plane only when its code-block jobs do not tile it (#15) | 4c2e602 | 46099316474 | Intel Xeon Platinum 8370C | 0.984 / 1.008 | 0.984 / 1.000 | no |
+| the same, zeroing only the grid cells no job writes (#15) | 7d4a4fe | 46102245728 | Intel Xeon 6975P-C | 1.050 / 1.052 | 1.064 / 1.035 | no |
+| the 9/7 row kernel reads the row in place, the copy fused into its first scale (#16) | 6d46e5b | 46100929574 | Intel Xeon 6975P-C | 0.989 / 0.997 | 0.994 / 1.013 | no |
+| 128-column blocks for the 9/7 and 5/3 vertical passes (`COL_BLOCK_97`) | 0a8e527 | 46103580831 | Intel Xeon 6975P-C | 0.997 / 1.003 | 0.981 / 0.983 | no |
+
+A change was to be kept at a 1% or larger gain on the class it was for, single-thread bigtiles
+`c0`: there the four gave 1.008, 1.052, 0.997 and 1.003, and three in a row under 1% ended the
+work. Other rows moved more, either way: bigtiles `dec` 0.984 and 0.989 at one thread, 0.981
+and 0.983 at default threads with `COL_BLOCK_97`, and other classes by up to 4% (plt `dec`
+0.960 at default threads in 46099316474) and 9% (fl `c0` 1.086 at default threads in
+46103580831). The second version of #15 is slower on every bigtiles row.
+
+- Plane zeroing: bigtiles has many code-blocks that no layer includes, which tier 2 does not
+  list, so their parts of a plane must be zeroed. The jobs of its planes do not tile them, so the
+  first version fell back to zeroing the whole plane. The second walked the code-block grid
+  and zeroed the missing cells; the profile of that branch (run 46103551699, Xeon 6975P-C) shows
+  the walk at 2.0% of the samples and `memset` at 6.0% (3.6% before): the missing cells are a
+  large share of each plane, and zeroing them cell by cell costs more than one `memset`. Its
+  guard also made the path depend on `max_alloc` (`tests/heap.rs`, `tests/reuse.rs` failed).
+  `tests/plane_fill.rs` on #15 (a sentinel in every plane, positive and NaN, against zeroed
+  planes, over the fixtures, bigtiles, and truncated and mutated copies, free functions and a
+  reused `Decoder`) passed on both versions (CI runs 46099569012 and 46102249781).
+- The copies: removing the row copy and halving the lifting calls each moved single-thread
+  bigtiles `c0` by under 1%. Most likely the copy's samples were its loads of rows that the
+  kernel then reads anyway, so the cost moved to the kernel.
+
+No A/B ran on an AMD EPYC 9V74: the runner's CPU is the host's pick, and these runs got Intel.
+Left on the EPYC 9V74's single-thread bigtiles `c0` (1.04 in run 46097722003): the inverse DWT's
+lifting (about 12 ms of a call over Go's), the kernel's page-fault symbols (14 ms over Go's, of
+which the output plane is most but not all, as the counts above show; the transparent huge page
+run above changed one thread by 0.99 to 1.02), and tier 1's cleanup and significance passes
+(11 ms over Go's, 7 ms of it back in magnitude refinement).
+
 ## Bench of record
 
 The numbers below are from one `bench.yml` run on `main` with the final kernel set, which was not
