@@ -90,6 +90,58 @@ transparent huge pages for B (`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, `ab.yml` 
 not in the gate) changed one thread by 0.99 to 1.02 and default threads by 0.94 to 1.01, so the
 faults cost little at one thread. A reused `Decoder` keeps its buffers between calls.
 
+## Partial plane zeroing and the copies (tried, none kept)
+
+The perf job of `profile.yml` (single thread, bigtiles), with the libc symbols, the libc
+callers and the page-fault stacks it prints since #14:
+
+- Run 46097722003, AMD EPYC 9V74: `c0` Go 346.3 ms, Rust 359.2 ms a call (1.04). System time
+  over the profile: Rust 0.43 s, Go 0.22 s. Per symbol, Rust against Go in ms of a `c0` call:
+  tier-1 cleanup and significance passes 199 against 187, magnitude refinement 19 against 26, the
+  inverse DWT's lifting, scaling and interleaving about 64 against 52, kernel page-fault symbols
+  about 23 against 9, Go's output conversion (`SamplesF`, `packF16SSE2`) 25 against Rust's
+  `pack_u16` 5.
+- Run 46098871361, Intel Xeon 6975P-C, share of all samples of `dec`: `memset` 3.2% (3.04%
+  `PlanePool::take_f`, the full zeroing of a spare tile-component plane; 0.12% `take_done`'s
+  `reuse`), `memmove` 3.2% (2.99% the copy of each row into the scratch line before the 9/7 row
+  kernel, 0.26% the copy of each code-block into the plane). Most of the `c0` profile's `memset`
+  samples had no caller in the unwind.
+- Page faults (626 to 635 thousand a profile run): 62% the one untimed `decode` the bench example
+  makes before it times `c0`, 28% the `u16` output of `c0` (64 MB, faulted in on each call),
+  9.5% the `memset` of the call's first new plane.
+
+Each change, A against B on one runner (`ab.yml`), Rust ms/Mpixel B / A for bigtiles:
+
+| change | B | `ab.yml` run | CPU | 1 thread `dec` / `c0` | default `dec` / `c0` | kept |
+|---|---|---|---|---|---|---|
+| zero a spare plane only when its code-block jobs do not tile it (#15) | 4c2e602 | 46099316474 | Intel Xeon Platinum 8370C | 0.984 / 1.008 | 0.984 / 1.000 | no |
+| the same, zeroing only the grid cells no job writes (#15) | 7d4a4fe | 46102245728 | Intel Xeon 6975P-C | 1.050 / 1.052 | 1.064 / 1.035 | no |
+| the 9/7 row kernel reads the row in place, the copy fused into its first scale (#16) | 6d46e5b | 46100929574 | Intel Xeon 6975P-C | 0.989 / 0.997 | 0.994 / 1.013 | no |
+| 128-column blocks for the 9/7 and 5/3 vertical passes (`COL_BLOCK_97`) | 0a8e527 | 46103580831 | Intel Xeon 6975P-C | 0.997 / 1.003 | 0.981 / 0.983 | no |
+
+Classes a change does not touch moved by up to 1.5% in these runs, so none of the four is
+outside the noise by the 1% a change needs; three in a row under 1% ended the work.
+
+- Plane zeroing: bigtiles has many code-blocks that no layer includes, which tier 2 does not
+  list, so their parts of a plane must be zeroed. The jobs of its planes do not tile them, so the
+  first version fell back to zeroing the whole plane. The second walked the code-block grid
+  and zeroed the missing cells; the profile of that branch (run 46103551699, Xeon 6975P-C) shows
+  the walk at 2.0% of the samples and `memset` at 6.0% (3.6% before): the missing cells are a
+  large share of each plane, and zeroing them cell by cell costs more than one `memset`. Its
+  guard also made the path depend on `max_alloc` (`tests/heap.rs`, `tests/reuse.rs` failed).
+  `tests/plane_fill.rs` on #15 (a sentinel in every plane, positive and NaN, against zeroed
+  planes, over the fixtures, bigtiles, and truncated and mutated copies, free functions and a
+  reused `Decoder`) passed on both versions.
+- The copies: removing the row copy and halving the lifting calls each moved the time by under
+  1%. Most likely the copy's samples were its loads of rows that the kernel then reads anyway,
+  so the cost moved to the kernel.
+
+No A/B ran on an AMD EPYC 9V74: the runner's CPU is the host's pick, and these runs got Intel.
+Left on the EPYC 9V74's single-thread bigtiles `c0` (1.04 in run 46097722003): the inverse DWT's
+lifting (about 12 ms of a call over Go's), the page faults of the output plane (14 ms over Go's;
+the transparent huge page run above changed one thread by 0.99 to 1.02), and tier 1's
+cleanup and significance passes (12 ms over Go's, 7 ms of it back in magnitude refinement).
+
 ## Bench of record
 
 The numbers below are from one `bench.yml` run on `main` with the final kernel set, which was not
