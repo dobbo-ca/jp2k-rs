@@ -222,7 +222,9 @@ fn zip<T: Copy>(out: &mut [T], l: &[T], h: &[T], cas: usize) {
 /// each step is one kernel call over contiguous memory, then the zip into `out`. Step 1 writes
 /// only low samples from high ones and step 2 only high samples from the finished low ones, so
 /// doing each over the split bands applies the same integer operations to the same operands.
+/// `out` holds the Mallat-ordered line on entry; `mal`, of its length, is scratch.
 fn row_53(mal: &mut [i32], sn: usize, cas: usize, out: &mut [i32]) {
+    mal.copy_from_slice(out);
     let dn = mal.len() - sn;
     if cas == 0 && dn == 0 && sn <= 1 {
         out.copy_from_slice(mal); // F.3.7: a single unmodified sample
@@ -252,22 +254,26 @@ fn step53_add(d: i32, a: i32, b: i32) -> i32 {
 
 /// The 9/7 row kernel for `Fused` and `Separate` rounding: `inverse_1d_97` on a Mallat-ordered
 /// line without interleaving first, so every step runs over contiguous memory, then the zip into
-/// `out`. The same operations on the same values in the same order, so the same bits.
+/// `out`. The same operations on the same values in the same order, so the same bits. `out` holds
+/// the Mallat-ordered line on entry; `mal`, of its length, is scratch, and the first scale of
+/// each band is its copy from `out`.
 fn row_97(mal: &mut [f32], sn: usize, cas: usize, out: &mut [f32], r: Rounding, hi: bool) {
     if mal.len() < 2 {
         // F.3.7: a length-1 9/7 signal is unchanged.
-        out.copy_from_slice(mal);
         return;
     }
     let (l, h) = mal.split_at_mut(sn);
-    simd::scale(l, DWT97_K);
+    let (ol, oh) = out.split_at(sn);
+    simd::scale_to(l, ol, DWT97_K);
     // A band at even positions reads neighbours i-1 and i of the other.
     let (lo, ho) = (cas as isize - 1, -(cas as isize));
     // `hi` false: the high band is all zero on entry, so its scale and the delta step, which
     // adds a multiple of it to the low band, change nothing (x + -0.0 is x) and are skipped.
     if hi {
-        simd::scale(h, DWT97_TWO_INV_K);
+        simd::scale_to(h, oh, DWT97_TWO_INV_K);
         lift_split_97(l, h, lo, -DWT97_DELTA, r);
+    } else {
+        h.copy_from_slice(oh);
     }
     lift_split_97(h, l, ho, -DWT97_GAMMA, r);
     lift_split_97(l, h, lo, -DWT97_BETA, r);
@@ -672,8 +678,7 @@ fn col_pass<T: Copy>(
     }
     for k in 0..bw {
         let line = &mut blk[k * rh..(k + 1) * rh];
-        kernel(line, sn_y, cas_y, &mut out[..rh], hi);
-        line.copy_from_slice(&out[..rh]);
+        kernel(&mut out[..rh], sn_y, cas_y, line, hi);
     }
     for y in 0..rh {
         let dst = &mut p[y * stride + x0..y * stride + x0 + bw];
@@ -683,9 +688,9 @@ fn col_pass<T: Copy>(
     }
 }
 
-/// Runs every level's horizontal then vertical pass. `kernel(mal, sn, cas, out)` turns one
-/// Mallat-ordered line (`sn` low samples first) into its interleaved reconstruction in `out`;
-/// it may use `mal` as scratch. `p` holds the tile component at `stride` in OpenJPEG's Mallat
+/// Runs every level's horizontal then vertical pass. `kernel(mal, sn, cas, out, hi)` turns the
+/// Mallat-ordered line in `out` (`sn` low samples first) into its interleaved reconstruction, in
+/// place; `mal`, of the line's length, is scratch (a row is not copied out before the kernel). `p` holds the tile component at `stride` in OpenJPEG's Mallat
 /// layout: before level r runs, resolution r-1's samples fill the top-left corner of
 /// resolution r's area and level r's HL, LH and HH bands sit to its right, below it and
 /// diagonally from it, low samples first on each axis. Every level reads and writes the same
@@ -842,7 +847,6 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                     |s, _, chunk| {
                         for row in chunk.chunks_mut(stride) {
                             let row = &mut row[..rw];
-                            s.mal[..rw].copy_from_slice(row);
                             kernel(&mut s.mal[..rw], sn_x, cas_x, row, hi);
                         }
                         Ok(())
@@ -855,7 +859,6 @@ fn inverse_dwt<T: Copy + Default + Send + Sample>(
                         check_cancel(cancel)?;
                     }
                     let row = &mut p[y * stride..y * stride + rw];
-                    s.mal[..rw].copy_from_slice(row);
                     kernel(&mut s.mal[..rw], sn_x, cas_x, row, hi);
                 }
             }
@@ -1025,6 +1028,7 @@ pub fn inverse_dwt_97(
             cancel,
             nw,
             |mal, sn, cas, out, _| {
+                mal.copy_from_slice(out);
                 let (l, h) = mal.split_at_mut(sn);
                 synth_97_jj(out, l, h, cas);
             },
@@ -1350,6 +1354,7 @@ mod tests {
                             &cancel,
                             1,
                             |mal, sn, cas, out, _| {
+                                mal.copy_from_slice(out);
                                 if r == Rounding::JJ2000 {
                                     let (l, h) = mal.split_at_mut(sn);
                                     synth_97_jj(out, l, h, cas);
@@ -1418,6 +1423,7 @@ mod tests {
                     &cancel,
                     1,
                     |mal, sn, cas, out, _| {
+                        mal.copy_from_slice(out);
                         let n = mal.len();
                         interleave(out, mal, sn, cas);
                         inverse_1d_53(out, sn, n - sn, cas);
