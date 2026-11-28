@@ -169,6 +169,24 @@ pub struct Band {
     np: usize,
 }
 
+impl Band {
+    /// The rect, in subband coordinates, of every code-block of the band's precincts (as
+    /// `CodeBlockRef` has it), precinct by precinct.
+    pub(crate) fn code_blocks(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.precincts[..self.np.min(self.precincts.len())]
+            .iter()
+            .flat_map(|p| (0..p.cw * p.ch).map(move |k| p.cb_rect(k)))
+    }
+
+    /// How many code-blocks `code_blocks` gives.
+    pub(crate) fn num_code_blocks(&self) -> usize {
+        self.precincts[..self.np.min(self.precincts.len())]
+            .iter()
+            .map(|p| p.cw * p.ch)
+            .sum()
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Resolution {
     pub rect: Rect,

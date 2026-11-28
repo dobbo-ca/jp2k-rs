@@ -485,8 +485,9 @@ struct LaneScratch {
     /// `emit`'s row buffers.
     rows: Vec<Vec<i32>>,
     row_pool: Pool<i32>,
-    /// `tiled`'s corners, kept empty (charged with the jobs).
+    /// `tiled`'s corners (charged with the jobs) and `zero_missing`'s job rectangles, kept empty.
     corners: Vec<(u32, u32)>,
+    cells: Vec<PlaneRect>,
 }
 
 impl LaneScratch {
@@ -520,37 +521,130 @@ pub(crate) const FILL_SENTINEL_NEG: u8 = 3;
 const SENTINEL_I: i32 = 1 << 24;
 const SENTINEL_F: f32 = 1.0e9;
 
-/// Whether the jobs' rectangles tile the `w` x `h` plane, each sample in exactly one; `corners`
-/// is scratch, and with no room for it the answer is no. Exact: every rectangle lies in the
-/// plane, their areas sum to its area, and the points that are a corner of an odd number of
-/// them are the plane's four corners. (Then the number of rectangles over a sample, less 1 inside
-/// the plane, has even corner parities and is 0 outside the plane, so it is even everywhere; it
-/// is never below -1, so it is never below 0, and it sums to 0, so it is 0.)
+/// A rectangle of a plane, `[x0, y0, x1, y1]`.
+type PlaneRect = [u32; 4];
+
+/// The rectangle of the plane a job writes, if it fits `u32`.
+fn job_rect(j: &CbJob) -> Option<PlaneRect> {
+    let (x0, y0) = (u32::try_from(j.x).ok()?, u32::try_from(j.y).ok()?);
+    let cw = u32::try_from(j.sx1.checked_sub(j.sx0)?).ok()?;
+    let ch = u32::try_from(j.sy1.checked_sub(j.sy0)?).ok()?;
+    Some([x0, y0, x0.checked_add(cw)?, y0.checked_add(ch)?])
+}
+
+/// The rectangle of the plane of code-block `cb` (subband coordinates) of resolution `r`, as a
+/// job of a whole-resolution plane places it.
+fn cell_rect(tg: &TileGeom, comp: usize, r: usize, subband: usize, cb: Rect) -> Option<PlaneRect> {
+    let b = CodeBlockRef {
+        subband,
+        x0: cb.x0,
+        y0: cb.y0,
+        x1: cb.x1,
+        y1: cb.y1,
+        ..CodeBlockRef::default()
+    };
+    let (x, y) = cb_origin(tg, comp, r, &b)?;
+    let (x0, y0) = (u32::try_from(x).ok()?, u32::try_from(y).ok()?);
+    let cw = u32::try_from(cb.x1.checked_sub(cb.x0)?).ok()?;
+    let ch = u32::try_from(cb.y1.checked_sub(cb.y0)?).ok()?;
+    Some([x0, y0, x0.checked_add(cw)?, y0.checked_add(ch)?])
+}
+
+/// Zeroes the cells of the tile component's code-block grid (resolutions up to `top`) that are no
+/// job's rectangle, when the cells tile the `w` x `h` plane; false, with nothing zeroed, when
+/// they do not or the ledger has no room for the scratch (`rects`, `corners`). Every sample is
+/// then in one cell, and a cell is a job's rectangle, which the job writes whole, or is zeroed.
+#[allow(clippy::too_many_arguments)]
+fn zero_missing<T: Copy + Default>(
+    plane: &mut [T],
+    w: usize,
+    h: usize,
+    jobs: &[CbJob],
+    tg: &TileGeom,
+    comp: usize,
+    top: usize,
+    budget: &Budget,
+    rects: &mut Vec<PlaneRect>,
+    corners: &mut Vec<(u32, u32)>,
+) -> bool {
+    let Some(tc) = tg.comps.get(comp) else {
+        return false;
+    };
+    let res = &tc.resolutions[..tc.resolutions.len().min(top + 1)];
+    let cells = || {
+        res.iter().enumerate().flat_map(move |(r, rs)| {
+            rs.bands.iter().flat_map(move |b| {
+                b.code_blocks()
+                    .map(move |cb| cell_rect(tg, comp, r, b.subband, cb))
+            })
+        })
+    };
+    let n: usize = res
+        .iter()
+        .flat_map(|rs| rs.bands.iter())
+        .map(|b| b.num_code_blocks())
+        .sum();
+    let bytes = n
+        .saturating_mul(4 * size_of::<(u32, u32)>())
+        .saturating_add(jobs.len().saturating_mul(size_of::<PlaneRect>()));
+    let Ok(_held) = budget.guard(bytes) else {
+        return false;
+    };
+    if plane.len() != w.saturating_mul(h) || !tiles(cells(), n, w, h, corners) {
+        return false;
+    }
+    rects.clear();
+    if rects.try_reserve(jobs.len()).is_err() {
+        return false;
+    }
+    rects.extend(jobs.iter().filter_map(job_rect));
+    rects.sort_unstable();
+    for c in cells().flatten() {
+        if rects.binary_search(&c).is_err() {
+            let [x0, y0, x1, y1] = c.map(|v| v as usize);
+            for y in y0..y1 {
+                plane[y * w + x0..y * w + x1].fill(T::default());
+            }
+        }
+    }
+    true
+}
+
+/// Whether the jobs' rectangles tile the `w` x `h` plane, each sample in exactly one.
 fn tiled(jobs: &[CbJob], w: usize, h: usize, corners: &mut Vec<(u32, u32)>) -> bool {
+    tiles(jobs.iter().map(job_rect), jobs.len(), w, h, corners)
+}
+
+/// Whether the `n` rectangles tile the `w` x `h` plane, each sample in exactly one (`None`, a
+/// rectangle that does not fit `u32`, is a no); `corners` is scratch, and with no room for it the
+/// answer is no. Exact: every rectangle is non-empty and lies in the plane, their areas sum to
+/// its area, and the points that are a corner of an odd number of them are the plane's four
+/// corners. (Then the number of rectangles over a sample, less 1 inside the plane, has even
+/// corner parities and is 0 outside the plane, so it is even everywhere; it is never below -1,
+/// so it is never below 0, and it sums to 0, so it is 0.)
+fn tiles(
+    rects: impl Iterator<Item = Option<PlaneRect>>,
+    n: usize,
+    w: usize,
+    h: usize,
+    corners: &mut Vec<(u32, u32)>,
+) -> bool {
     corners.clear();
     let (Ok(pw), Ok(ph)) = (u32::try_from(w), u32::try_from(h)) else {
         return false;
     };
-    if jobs.is_empty() || corners.try_reserve(4 * jobs.len()).is_err() {
+    if n == 0 || corners.try_reserve(n.saturating_mul(4)).is_err() {
         return false;
     }
     let mut area = 0u64;
-    for j in jobs {
-        let (Ok(x0), Ok(y0)) = (u32::try_from(j.x), u32::try_from(j.y)) else {
+    for r in rects {
+        let Some([x0, y0, x1, y1]) = r else {
             return false;
         };
-        let (Some(cw), Some(ch)) = (j.sx1.checked_sub(j.sx0), j.sy1.checked_sub(j.sy0)) else {
-            return false;
-        };
-        let x1 = u32::try_from(cw).ok().and_then(|c| x0.checked_add(c));
-        let y1 = u32::try_from(ch).ok().and_then(|c| y0.checked_add(c));
-        let (Some(x1), Some(y1)) = (x1, y1) else {
-            return false;
-        };
-        if cw == 0 || ch == 0 || x1 > pw || y1 > ph {
+        if x0 >= x1 || y0 >= y1 || x1 > pw || y1 > ph {
             return false;
         }
-        area += cw as u64 * ch as u64;
+        area += u64::from(x1 - x0) * u64::from(y1 - y0);
         corners.extend_from_slice(&[(x0, y0), (x1, y0), (x0, y1), (x1, y1)]);
     }
     if area != w as u64 * h as u64 {
@@ -805,15 +899,49 @@ fn decode_component(
         }
         let (w, h) = sizes[0];
         let mut corners = std::mem::take(&mut scratch.corners);
+        let mut cells = std::mem::take(&mut scratch.cells);
         if !zeroed && (fill == FILL_ZERO || !tiled(&jobs, w, h, &mut corners)) {
-            if rev {
-                lvi[0].fill(0);
-            } else {
-                lvf[0].fill(0.0);
+            // Only the code-blocks no job writes, else all of it.
+            let ledger: &Budget = budget;
+            let part = fill != FILL_ZERO
+                && if rev {
+                    zero_missing(
+                        &mut lvi[0],
+                        w,
+                        h,
+                        &jobs,
+                        tg,
+                        comp,
+                        top,
+                        ledger,
+                        &mut cells,
+                        &mut corners,
+                    )
+                } else {
+                    zero_missing(
+                        &mut lvf[0],
+                        w,
+                        h,
+                        &jobs,
+                        tg,
+                        comp,
+                        top,
+                        ledger,
+                        &mut cells,
+                        &mut corners,
+                    )
+                };
+            if !part {
+                if rev {
+                    lvi[0].fill(0);
+                } else {
+                    lvf[0].fill(0.0);
+                }
             }
         }
         if keep {
             scratch.corners = corners;
+            scratch.cells = cells;
         }
     }
 
@@ -2280,12 +2408,15 @@ fn decode_image_once(
             // when they hold at most `KEPT_SMALL`; it frees bigger ones, as a free call does.
             if keep {
                 groups.recycle();
-                let jobs_heap = held_by(&lane.scratch.jobs) + held_by(&lane.scratch.corners);
+                let jobs_heap = held_by(&lane.scratch.jobs)
+                    + held_by(&lane.scratch.corners)
+                    + held_by(&lane.scratch.cells);
                 if small && groups.heap() + jobs_heap <= KEPT_SMALL {
                     lane.scratch.groups = groups;
                 } else {
                     lane.scratch.jobs = Vec::new();
                     lane.scratch.corners = Vec::new();
+                    lane.scratch.cells = Vec::new();
                 }
             }
             p
