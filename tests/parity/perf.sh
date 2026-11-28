@@ -46,12 +46,12 @@ for op in ${OPS:-c0 dec}; do
       echo
       echo "by dso:"
       perf report -i "$d/perf.data" --no-children --sort dso,symbol --stdio 2>/dev/null | grep -vE '^#|^$' | head -n 25 | cut -c1-160 || true
-      perf record -q -F 499 --call-graph dwarf,32768 -o "$d/cg.data" "$@" >/dev/null 2>&1 || true
+      BENCH_OP=$op perf record -q -F 499 --call-graph dwarf,32768 -o "$d/cg.data" "$@" >/dev/null 2>&1 || true
       echo
       echo "libc callers (share of all samples):"
       perf report -i "$d/cg.data" --no-children --sort symbol --dsos libc.so.6 --stdio -g folded,0.05,callee --percent-limit 0.05 2>/dev/null |
         grep -vE '^#|^$' | head -n 60 | sed 's/;core::[^;]*//g; s/;<alloc::[^;]*//g' | cut -c1-400 || true
-      perf record -q -e page-faults -c 64 --call-graph dwarf,16384 -o "$d/pf.data" "$@" >/dev/null 2>&1 || true
+      BENCH_OP=$op perf record -q -e page-faults -c 64 --call-graph dwarf,16384 -o "$d/pf.data" "$@" >/dev/null 2>&1 || true
       echo
       echo "page faults: $(perf report -i "$d/pf.data" --stdio 2>/dev/null | sed -n 's/^# Event count (approx.): //p')"
       perf report -i "$d/pf.data" --no-children --sort symbol --stdio -g folded,1,callee --percent-limit 1 2>/dev/null |
