@@ -52,5 +52,6 @@ jobs:
           docker create --name perf jp2k-perf:local && docker cp perf:/out ./out
           sudo apt-get update -q
           sudo apt-get install -y -q linux-tools-common "linux-tools-$(uname -r)" || sudo apt-get install -y -q linux-tools-azure
+          sudo apt-get install -y -q libc6-dbg || true
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0
           sh tests/parity/perf.sh out | tee -a "$GITHUB_STEP_SUMMARY"

@@ -39,6 +39,24 @@ for op in ${OPS:-c0 dec}; do
       perf report -i "$d/bm.data" --no-children --sort symbol --stdio 2>/dev/null | grep -vE '^#|^$' | head -n 12 | cut -c1-160 || true
       hot "$d/bm.data"
     fi
+    # Rust only: self time by library and symbol (libc's memset and memcpy are named when the
+    # runner has libc6-dbg), the call stacks into the mem* functions (their callers' shares), and
+    # the call stacks of the page faults, folded, one stack a line.
+    if [ $side = rust ]; then
+      echo
+      echo "by dso:"
+      perf report -i "$d/perf.data" --no-children --sort dso,symbol --stdio 2>/dev/null | grep -vE '^#|^$' | head -n 25 | cut -c1-160 || true
+      perf record -q -F 499 --call-graph dwarf,32768 -o "$d/cg.data" "$@" >/dev/null 2>&1 || true
+      echo
+      echo "mem* callers (share of all samples):"
+      perf report -i "$d/cg.data" --no-children --sort symbol --symbol-filter=mem --stdio -g folded,0.2,caller --percent-limit 0.1 2>/dev/null |
+        grep -vE '^#|^$' | head -n 60 | cut -c1-400 || true
+      perf record -q -e page-faults -c 64 --call-graph dwarf,16384 -o "$d/pf.data" "$@" >/dev/null 2>&1 || true
+      echo
+      echo "page faults: $(perf report -i "$d/pf.data" --stdio 2>/dev/null | sed -n 's/^# Event count (approx.): //p')"
+      perf report -i "$d/pf.data" --no-children --sort symbol --stdio -g folded,1,caller --percent-limit 1 2>/dev/null |
+        grep -vE '^#|^$' | head -n 40 | cut -c1-400 || true
+    fi
     echo '```'
   done
 done
