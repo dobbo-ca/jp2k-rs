@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     up to 64 KiB, and a bigger join is freed when its block ends, an error of the block included;
     a lane keeps its row buffers only up to 64 KiB of capacity, and frees the rest when a tile
     component's rows are written; a lane keeps a tile component's code-block lists (its groups,
-    their index and its tier-1 jobs) for the next component only when they hold at most 64 KiB,
+    their index, its tier-1 jobs and their corners) for the next component only when they hold at most 64 KiB,
     by capacity (the index's estimated from its capacity), and frees bigger ones when the
     component is decoded, dropping the index as soon as the lists and it hold over 64 KiB, as
     the free function drops it (charging them between components would raise the ledger while the

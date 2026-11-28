@@ -16,7 +16,7 @@ use crate::{ColorModel, Config, Options, Plane, Raster};
 use std::collections::HashMap;
 use std::io::Read;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -143,7 +143,8 @@ impl Groups {
 /// position) by code-block identity, into `gr.groups`. Segments are sorted by layer so
 /// concatenation order matches the encoder's layer order regardless of the codestream's
 /// progression. Returns the bytes charged to `budget` for them (the group, its map entry, its
-/// job in `decode_component`, and twice each segment for Vec growth); the caller releases them.
+/// job and its four corners in `decode_component`, and twice each segment for Vec growth); the
+/// caller releases them.
 fn group_code_blocks(
     pkts: &[PacketRef],
     comp: usize,
@@ -166,7 +167,7 @@ fn group_code_blocks(
             let group_cost = if gr.index.contains_key(&k) {
                 0
             } else {
-                size_of::<CbGroup>() + size_of::<CbJob>() + 2 * 64
+                size_of::<CbGroup>() + size_of::<CbJob>() + 4 * size_of::<(u32, u32)>() + 2 * 64
             };
             budget.charge(seg_cost + group_cost)?;
             charged += seg_cost + group_cost;
@@ -335,40 +336,41 @@ const PLANE_BAND_ROWS: usize = ROW_CHUNK;
 const POOL_PLANES: usize = 3;
 
 impl PlanePool {
-    /// A zeroed plane of `n` samples and the bytes charged for it: a spare one (by the bytes it
-    /// was charged, not its capacity, which a kept plane can have more of), else a new one.
-    fn take_i(&mut self, n: usize, budget: &mut Budget) -> Result<(Vec<i32>, usize)> {
+    /// A plane of `n` samples, the bytes charged for it, and whether it is zeroed: a spare one
+    /// (by the bytes it was charged, not its capacity, which a kept plane can have more of), not
+    /// zeroed (it holds the samples of its last tile component), else a new zeroed one.
+    fn take_i(&mut self, n: usize, budget: &mut Budget) -> Result<(Vec<i32>, usize, bool)> {
         if let Some(k) = self.i.iter().position(|(_, c)| *c >= n.saturating_mul(4)) {
             let (mut v, c) = self.i.swap_remove(k);
             self.bytes -= c;
-            v.clear();
             v.resize(n, 0);
-            return Ok((v, c));
+            return Ok((v, c, false));
         }
-        take_done(
+        let (v, c) = take_done(
             &mut self.done_i,
             &mut self.cold_i,
             &mut self.bytes,
             n,
             budget,
-        )
+        )?;
+        Ok((v, c, true))
     }
 
-    fn take_f(&mut self, n: usize, budget: &mut Budget) -> Result<(Vec<f32>, usize)> {
+    fn take_f(&mut self, n: usize, budget: &mut Budget) -> Result<(Vec<f32>, usize, bool)> {
         if let Some(k) = self.f.iter().position(|(_, c)| *c >= n.saturating_mul(4)) {
             let (mut v, c) = self.f.swap_remove(k);
             self.bytes -= c;
-            v.clear();
             v.resize(n, 0.0);
-            return Ok((v, c));
+            return Ok((v, c, false));
         }
-        take_done(
+        let (v, c) = take_done(
             &mut self.done_f,
             &mut self.cold_f,
             &mut self.bytes,
             n,
             budget,
-        )
+        )?;
+        Ok((v, c, true))
     }
 
     /// Keeps the plane of a finished tile component, or if enough are kept frees it and gives
@@ -483,6 +485,8 @@ struct LaneScratch {
     /// `emit`'s row buffers.
     rows: Vec<Vec<i32>>,
     row_pool: Pool<i32>,
+    /// `tiled`'s corners, kept empty (charged with the jobs).
+    corners: Vec<(u32, u32)>,
 }
 
 impl LaneScratch {
@@ -500,6 +504,71 @@ impl LaneScratch {
             self.t2 = tier2::TileScratch::default();
         }
     }
+}
+
+/// What a spare whole-resolution plane holds before its code-blocks are copied in, for every
+/// decode of the process (a test and fuzz hook, `fuzz::plane_fill`): by default its old samples,
+/// zeroed where the blocks do not tile it.
+pub(crate) static PLANE_FILL: AtomicU8 = AtomicU8::new(0);
+/// Every plane zeroed whether or not the blocks tile it (the decoder before `tiled`).
+pub(crate) const FILL_ZERO: u8 = 1;
+/// Every plane filled with a sentinel first: `SENTINEL_I` or `SENTINEL_F`, or with
+/// `FILL_SENTINEL_NEG` `-SENTINEL_I` or NaN. A sample no block writes and the transform reads
+/// then changes the output from `FILL_ZERO`'s.
+pub(crate) const FILL_SENTINEL: u8 = 2;
+pub(crate) const FILL_SENTINEL_NEG: u8 = 3;
+const SENTINEL_I: i32 = 1 << 24;
+const SENTINEL_F: f32 = 1.0e9;
+
+/// Whether the jobs' rectangles tile the `w` x `h` plane, each sample in exactly one; `corners`
+/// is scratch, and with no room for it the answer is no. Exact: every rectangle lies in the
+/// plane, their areas sum to its area, and the points that are a corner of an odd number of
+/// them are the plane's four corners. (Then the number of rectangles over a sample, less 1 inside
+/// the plane, has even corner parities and is 0 outside the plane, so it is even everywhere; it
+/// is never below -1, so it is never below 0, and it sums to 0, so it is 0.)
+fn tiled(jobs: &[CbJob], w: usize, h: usize, corners: &mut Vec<(u32, u32)>) -> bool {
+    corners.clear();
+    let (Ok(pw), Ok(ph)) = (u32::try_from(w), u32::try_from(h)) else {
+        return false;
+    };
+    if jobs.is_empty() || corners.try_reserve(4 * jobs.len()).is_err() {
+        return false;
+    }
+    let mut area = 0u64;
+    for j in jobs {
+        let (Ok(x0), Ok(y0)) = (u32::try_from(j.x), u32::try_from(j.y)) else {
+            return false;
+        };
+        let (Some(cw), Some(ch)) = (j.sx1.checked_sub(j.sx0), j.sy1.checked_sub(j.sy0)) else {
+            return false;
+        };
+        let x1 = u32::try_from(cw).ok().and_then(|c| x0.checked_add(c));
+        let y1 = u32::try_from(ch).ok().and_then(|c| y0.checked_add(c));
+        let (Some(x1), Some(y1)) = (x1, y1) else {
+            return false;
+        };
+        if cw == 0 || ch == 0 || x1 > pw || y1 > ph {
+            return false;
+        }
+        area += cw as u64 * ch as u64;
+        corners.extend_from_slice(&[(x0, y0), (x1, y0), (x0, y1), (x1, y1)]);
+    }
+    if area != w as u64 * h as u64 {
+        return false;
+    }
+    corners.sort_unstable();
+    // The plane's corners in sorted order.
+    let want = [(0, 0), (0, ph), (pw, 0), (pw, ph)];
+    let mut odd = 0;
+    for run in corners.chunk_by(|a, b| a == b) {
+        if run.len() % 2 == 1 {
+            if odd == want.len() || run[0] != want[odd] {
+                return false;
+            }
+            odd += 1;
+        }
+    }
+    odd == want.len()
 }
 
 /// One code-block ready for tier-1: where it lands in the plane, and its subband's step size.
@@ -610,21 +679,23 @@ fn decode_component(
     let mut lvf = std::mem::take(&mut scratch.lvf);
     lvi.clear();
     lvf.clear();
-    // The plane of a whole resolution comes from the lane's spares, with its charge.
+    // The plane of a whole resolution comes from the lane's spares, with its charge; a spare is
+    // zeroed below only where its code-blocks do not cover it.
     let mut pooled = 0usize;
+    let mut zeroed = true;
     for (k, &(w, h)) in sizes[..nl].iter().enumerate() {
         let n = w
             .checked_mul(h)
             .ok_or_else(|| limit!("tile component plane size overflows"))?;
         if wins.is_none() {
             if rev {
-                let (v, c) = scratch.planes.take_i(n, budget)?;
+                let (v, c, z) = scratch.planes.take_i(n, budget)?;
                 lvi.push(v);
-                pooled = c;
+                (pooled, zeroed) = (c, z);
             } else {
-                let (v, c) = scratch.planes.take_f(n, budget)?;
+                let (v, c, z) = scratch.planes.take_f(n, budget)?;
                 lvf.push(v);
-                pooled = c;
+                (pooled, zeroed) = (c, z);
             }
         } else if rev {
             let pl = &mut scratch.planes;
@@ -717,6 +788,33 @@ fn decode_component(
         return Err(limit!(
             "tile {tile_idx}: tier-1 work exceeds the budget for the input size"
         ));
+    }
+    // A whole-resolution plane that is not zeroed holds a spare's old samples: each job writes
+    // every sample of its rectangle, so the plane is zeroed only when the jobs do not tile it
+    // (a code-block no layer includes, a truncated stream, a skipped malformed block).
+    if wins.is_none() {
+        let fill = PLANE_FILL.load(Ordering::Relaxed);
+        if fill == FILL_SENTINEL || fill == FILL_SENTINEL_NEG {
+            let neg = fill == FILL_SENTINEL_NEG;
+            if rev {
+                lvi[0].fill(if neg { -SENTINEL_I } else { SENTINEL_I });
+            } else {
+                lvf[0].fill(if neg { f32::NAN } else { SENTINEL_F });
+            }
+            zeroed = false;
+        }
+        let (w, h) = sizes[0];
+        let mut corners = std::mem::take(&mut scratch.corners);
+        if !zeroed && (fill == FILL_ZERO || !tiled(&jobs, w, h, &mut corners)) {
+            if rev {
+                lvi[0].fill(0);
+            } else {
+                lvf[0].fill(0.0);
+            }
+        }
+        if keep {
+            scratch.corners = corners;
+        }
     }
 
     if !jobs.is_empty() {
@@ -915,8 +1013,9 @@ fn decode_component(
     }
     // No code-block: every sample of the component is zero, and stays zero through the
     // transform (the buffers were zeroed above).
-    // A level without any HL, LH or HH code-block has zero high bands (the buffers started
-    // zeroed), so its lifting can skip them.
+    // A level without any HL, LH or HH code-block has zero high bands (the buffers were zeroed
+    // above, as the blocks did not tile them, or the bands are empty), so its lifting can skip
+    // them.
     let mut high = [false; MAX_RES];
     for j in &jobs {
         high[groups[j.g].res] = true;
@@ -2181,10 +2280,12 @@ fn decode_image_once(
             // when they hold at most `KEPT_SMALL`; it frees bigger ones, as a free call does.
             if keep {
                 groups.recycle();
-                if small && groups.heap() + held_by(&lane.scratch.jobs) <= KEPT_SMALL {
+                let jobs_heap = held_by(&lane.scratch.jobs) + held_by(&lane.scratch.corners);
+                if small && groups.heap() + jobs_heap <= KEPT_SMALL {
                     lane.scratch.groups = groups;
                 } else {
                     lane.scratch.jobs = Vec::new();
+                    lane.scratch.corners = Vec::new();
                 }
             }
             p

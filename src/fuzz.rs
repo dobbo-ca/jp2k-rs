@@ -129,3 +129,12 @@ pub fn mq_decisions(data: &[u8], limits: &Limits) -> Result<u32> {
     check_input(data.len(), limits)?;
     Ok(tier1::mq_decisions(data))
 }
+
+/// What the decoder's spare whole-resolution planes hold before their code-blocks are copied in,
+/// for every decode of the process from now on: 0 the default (old samples, zeroed where the
+/// blocks do not tile the plane), 1 zeroed always, 2 a positive sentinel, 3 a negative one (NaN
+/// for the 9/7 planes); a larger `mode` is 3. Decodes under 1, 2 and 3 must give the same
+/// results, else a sample no code-block writes reaches the output.
+pub fn plane_fill(mode: u8) {
+    crate::decoder::PLANE_FILL.store(mode.min(3), std::sync::atomic::Ordering::Relaxed);
+}
